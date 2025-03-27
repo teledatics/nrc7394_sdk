@@ -1,0 +1,7 @@
+INCLUDE += -I$(ETH_ENC28J60_BASE)
+VPATH   += $(ETH_ENC28J60_BASE)
+DEFINE	+= -DETH_DRIVER_ENC28J60
+
+CSRCS += \
+	eth_mac_enc28j60.c \
+	eth_phy_enc28j60.c
