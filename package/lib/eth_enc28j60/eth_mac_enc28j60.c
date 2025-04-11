@@ -15,7 +15,9 @@
 #include "api_dma.h"
 #include "api_spi_dma.h"
 
+#define TX_WAIT_TIMEOUT_MS 10
 #define MAX_RETRY_COUNT 10
+#define MAX_REG_RETRY_COUNT 1000
 // #define ETHERNET_SPI_DMA 1
 #undef ENABLE_ETHERNET_INTERRUPT
 // #define ENABLE_ETHERNET_INTERRUPT 1
@@ -33,19 +35,23 @@ static const char* TAG = "enc28j60";
 
 #define MAC_CHECK(a, str, goto_tag, ret_value, ...)                            \
   do {                                                                         \
-    if (!(a)) {                                                                \
-      E(TT_NET, "%s (%d): " str "\n", __FUNCTION__, __LINE__, ##__VA_ARGS__); \
+    int retry = MAX_REG_RETRY_COUNT;                                               \
+    if (!(a) || !(--retry)) {                                                  \
+      E(TT_NET, "%s (%d): " str "\n", __FUNCTION__, __LINE__, ##__VA_ARGS__);  \
       ret = ret_value;                                                         \
       goto goto_tag;                                                           \
     }                                                                          \
+    delay_us(10);                                                              \
   } while (0)
 
 #define MAC_CHECK_NO_RET(a, str, goto_tag, ...)                                \
   do {                                                                         \
-    if (!(a)) {                                                                \
-      E(TT_NET, "%s (%d):" str  "\n", __FUNCTION__, __LINE__, ##__VA_ARGS__); \
+    int retry = MAX_REG_RETRY_COUNT;                                               \
+    if (!(a) || !(--retry)) {                                                  \
+      E(TT_NET, "%s (%d):" str  "\n", __FUNCTION__, __LINE__, ##__VA_ARGS__);  \
       goto goto_tag;                                                           \
     }                                                                          \
+    delay_us(10);                                                              \
   } while (0)
 
 #define ENC28J60_SPI_LOCK_TIMEOUT_MS (50)
@@ -209,8 +215,6 @@ spi_read_op(spi_device_t* spi, u8 op, u8 addr)
   memset(tx_buf, 0, sizeof(tx_buf));
   nrc_spi_xfer(spi, tx_buf, rx_buf, slen);
   nrc_spi_stop_xfer(spi);
-  
-  delay_us(100);
 
   return val = rx_buf[slen - 1];
 }
@@ -228,8 +232,6 @@ spi_write_op(spi_device_t* spi, u8 op, u8 addr, u8 val)
   nrc_spi_start_xfer(spi);
   ret = nrc_spi_xfer(spi, spi_transfer_buf, spi_transfer_buf, 2);
   nrc_spi_stop_xfer(spi);
-  
-  delay_us(100);
 
   return ret;
 }
@@ -239,15 +241,9 @@ spi_write(spi_device_t* spi, u8* data, int len)
 {
   int ret = NRC_SUCCESS;
 
-  enc28j60_spi_lock(gemac);
-
   nrc_spi_start_xfer(spi);
   ret = nrc_spi_xfer(spi, data, data, len);
   nrc_spi_stop_xfer(spi);
-  
-  delay_us(100);
-
-  enc28j60_spi_unlock(gemac);
   
   return ret;
 }
@@ -289,8 +285,6 @@ spi_read_buf(spi_device_t* spi, int len, u8* data)
   }
   nrc_spi_stop_xfer(spi);
 
-  delay_us(100);
-  
   if (ret == 0) {
     memcpy(data, &rx_buf[1], len);
   } else {
@@ -308,11 +302,9 @@ spi_write_buf(spi_device_t* spi, int len, const u8* data)
   if (len > SPI_TRANSFER_BUF_LEN - 1 || len <= 0) {
     ret = NRC_FAIL;
   } else {
-    enc28j60_spi_lock(gemac);
     spi_transfer_buf[0] = ENC28J60_WRITE_BUF_MEM;
     memcpy(&spi_transfer_buf[1], data, len);
     ret = spi_write(spi, (u8*)spi_transfer_buf, len + 1);
-    enc28j60_spi_unlock(gemac);
   }
 
   return ret;
@@ -323,6 +315,8 @@ spi_device_transmit(spi_device_t spi_hdl,
                             spi_transaction_t* trans)
 {
   nrc_err_t retval = NRC_FAIL;
+
+  if (enc28j60_spi_lock(gemac)) {
 
   switch (trans->cmd) {
     case ENC28J60_SPI_CMD_WCR:
@@ -417,6 +411,10 @@ spi_device_transmit(spi_device_t spi_hdl,
       }
       break;
   }
+  enc28j60_spi_unlock(gemac);
+  } else {
+    retval = NRC_FAIL;
+  }
 
   return retval;
 }
@@ -481,15 +479,11 @@ enc28j60_do_register_write(emac_enc28j60_t* emac,
                               .flags = SPI_TRANS_USE_TXDATA,
                               .tx_data = { [0] = value } };
 
-  if (enc28j60_spi_lock(emac)) {
-    if (spi_device_transmit(emac->spi_hdl, &trans) != NRC_SUCCESS) {
-      // ESP_LOGE(TAG, "%s(%d): spi transmit failed", __FUNCTION__, __LINE__);
-      ret = NRC_FAIL;
-    }
-    enc28j60_spi_unlock(emac);
-  } else {
+  if (spi_device_transmit(emac->spi_hdl, &trans) != NRC_SUCCESS) {
+    // ESP_LOGE(TAG, "%s(%d): spi transmit failed", __FUNCTION__, __LINE__);
     ret = NRC_FAIL;
   }
+  
   return ret;
 }
 
@@ -511,19 +505,13 @@ enc28j60_do_register_read(emac_enc28j60_t* emac,
     .flags = SPI_TRANS_USE_RXDATA
   };
 
-  delay_us(15);
-
-  if (enc28j60_spi_lock(emac)) {
-    if (spi_device_transmit(emac->spi_hdl, &trans) != NRC_SUCCESS) {
-      // ESP_LOGE(TAG, "%s(%d): spi transmit failed", __FUNCTION__, __LINE__);
-      ret = NRC_FAIL;
-    } else {
-      *value = is_eth_reg ? trans.rx_data[0] : trans.rx_data[1];
-    }
-    enc28j60_spi_unlock(emac);
-  } else {
+  if (spi_device_transmit(emac->spi_hdl, &trans) != NRC_SUCCESS) {
+    // ESP_LOGE(TAG, "%s(%d): spi transmit failed", __FUNCTION__, __LINE__);
     ret = NRC_FAIL;
+  } else {
+    *value = is_eth_reg ? trans.rx_data[0] : trans.rx_data[1];
   }
+  
   return ret;
 }
 
@@ -541,15 +529,11 @@ enc28j60_do_bitwise_set(emac_enc28j60_t* emac, uint8_t reg_addr, uint8_t mask)
                               .flags = SPI_TRANS_USE_TXDATA,
                               .tx_data = { [0] = mask } };
 
-  if (enc28j60_spi_lock(emac)) {
-    if (spi_device_transmit(emac->spi_hdl, &trans) != NRC_SUCCESS) {
+  if (spi_device_transmit(emac->spi_hdl, &trans) != NRC_SUCCESS) {
       // ESP_LOGE(TAG, "%s(%d): spi transmit failed", __FUNCTION__, __LINE__);
-      ret = NRC_FAIL;
-    }
-    enc28j60_spi_unlock(emac);
-  } else {
     ret = NRC_FAIL;
   }
+  
   return ret;
 }
 
@@ -567,15 +551,11 @@ enc28j60_do_bitwise_clr(emac_enc28j60_t* emac, uint8_t reg_addr, uint8_t mask)
                               .flags = SPI_TRANS_USE_TXDATA,
                               .tx_data = { [0] = mask } };
 
-  if (enc28j60_spi_lock(emac)) {
-    if (spi_device_transmit(emac->spi_hdl, &trans) != NRC_SUCCESS) {
-      // ESP_LOGE(TAG, "%s(%d): spi transmit failed", __FUNCTION__, __LINE__);
-      ret = NRC_FAIL;
-    }
-    enc28j60_spi_unlock(emac);
-  } else {
+  if (spi_device_transmit(emac->spi_hdl, &trans) != NRC_SUCCESS) {
+    // ESP_LOGE(TAG, "%s(%d): spi transmit failed", __FUNCTION__, __LINE__);
     ret = NRC_FAIL;
   }
+  
   return ret;
 }
 
@@ -592,14 +572,10 @@ enc28j60_do_memory_write(emac_enc28j60_t* emac, uint8_t* buffer, uint32_t len)
                               .length = len * 8,
                               .tx_buffer = buffer };
 
-  if (enc28j60_spi_lock(emac)) {
-    if (spi_device_transmit(emac->spi_hdl, &trans) != NRC_SUCCESS) {
-      ret = NRC_FAIL;
-    }
-    enc28j60_spi_unlock(emac);
-  } else {
+  if (spi_device_transmit(emac->spi_hdl, &trans) != NRC_SUCCESS) {
     ret = NRC_FAIL;
   }
+    
   return ret;
 }
 
@@ -615,15 +591,11 @@ enc28j60_do_memory_read(emac_enc28j60_t* emac, uint8_t* buffer, uint32_t len)
                               .length = len * 8,
                               .rx_buffer = buffer };
 
-  if (enc28j60_spi_lock(emac)) {
-    if (spi_device_transmit(emac->spi_hdl, &trans) != NRC_SUCCESS) {
+  if (spi_device_transmit(emac->spi_hdl, &trans) != NRC_SUCCESS) {
       // ESP_LOGE(TAG, "%s(%d): spi transmit failed", __FUNCTION__, __LINE__);
       ret = NRC_FAIL;
-    }
-    enc28j60_spi_unlock(emac);
-  } else {
-    ret = NRC_FAIL;
   }
+  
   return ret;
 }
 
@@ -639,14 +611,10 @@ enc28j60_do_reset(emac_enc28j60_t* emac)
     .cmd = ENC28J60_SPI_CMD_SRC, // Soft reset
     .addr = 0x1F,
   };
-  if (enc28j60_spi_lock(emac)) {
-    if (spi_device_transmit(emac->spi_hdl, &trans) != NRC_SUCCESS) {
+  
+  if (spi_device_transmit(emac->spi_hdl, &trans) != NRC_SUCCESS) {
       // ESP_LOGE(TAG, "%s(%d): spi transmit failed", __FUNCTION__, __LINE__);
       ret = NRC_FAIL;
-    }
-    enc28j60_spi_unlock(emac);
-  } else {
-    ret = NRC_FAIL;
   }
 
   // After reset, wait at least 1ms for the device to be ready
@@ -1226,6 +1194,7 @@ enc28j60_isr_handler(int vector)
 }
 #endif
 
+
 /**
  * @brief Main ENC28J60 Task. Mainly used for Rx processing. However, it also
  * handles other interrupts.
@@ -1250,6 +1219,7 @@ emac_enc28j60_task(void* arg)
     if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY) == 0) { // ...and no interrupt asserted
         nrc_gpio_inputb(emac->int_gpio_num, &int_bit);
         if (int_bit == 1) {
+          // emac_enc28j60_sanity_check(emac);
           continue;                          // -> just continue to check again
         }
     }
@@ -1258,7 +1228,8 @@ emac_enc28j60_task(void* arg)
     vTaskDelay(pdMS_TO_TICKS(1000) / 40);
     nrc_gpio_inputb(emac->int_gpio_num, &int_bit);
     if (int_bit == 1) {
-        continue;
+      // emac_enc28j60_sanity_check(emac);
+      continue;
     }
 #endif
 
@@ -1353,7 +1324,6 @@ emac_enc28j60_task(void* arg)
             "clear TXIF failed",
             loop_end);
           // Enable global interrupt flag and try to retransmit
-
           MAC_CHECK_NO_RET(
             enc28j60_do_bitwise_set(emac, ENC28J60_EIE, EIE_INTIE) == NRC_SUCCESS,
             "set INTIE failed",
@@ -1368,6 +1338,27 @@ emac_enc28j60_task(void* arg)
         }
       }
     }
+
+    // check for RX errors
+    if(status & EIR_RXERIF) {
+
+      MAC_CHECK_NO_RET(
+        enc28j60_do_bitwise_set(emac, ENC28J60_ECON1, ECON1_RXRST) == NRC_SUCCESS,
+        "set RXRST failed",
+        loop_next);
+
+      MAC_CHECK_NO_RET(
+        enc28j60_do_bitwise_clr(emac, ENC28J60_ECON1, ECON1_RXRST) == NRC_SUCCESS,
+        "clear RXRST failed",
+        loop_next);
+
+      // Clear Rx Error Interrupt Flag
+      MAC_CHECK_NO_RET(
+        enc28j60_do_bitwise_clr(emac, ENC28J60_EIR, EIR_RXERIF) == NRC_SUCCESS,
+        "clear RXERIF failed",
+        loop_next);
+    }
+loop_next:
 
     // transmit ready
     if (status & EIR_TXIF) {
@@ -1494,6 +1485,34 @@ out:
   return ret;
 }
 
+ATTR_NC __attribute__((optimize("O3"))) static nrc_err_t  
+wait_for_transmit_completion(emac_enc28j60_t *emac) 
+{
+  int ret = NRC_SUCCESS;
+  uint8_t econ1 = 0;
+  uint32_t timeout = xTaskGetTickCount() + pdMS_TO_TICKS(TX_WAIT_TIMEOUT_MS);
+
+  do {
+    /* Check if last transmit complete */
+    MAC_CHECK(enc28j60_do_register_read(emac, true, ENC28J60_ECON1, &econ1) == NRC_SUCCESS,
+              "read ECON1 failed", out, NRC_FAIL);
+
+        if(!(econ1 & ECON1_TXRTS))
+          break;
+
+        if (xTaskGetTickCount() >= timeout) {
+            E(TT_NET, "timeout expired, transmission stuck");
+            return NRC_FAIL;
+        }
+
+        delay_us(100);
+
+    } while (econ1 & ECON1_TXRTS);
+
+out:
+    return ret;
+}
+
 ATTR_NC __attribute__((optimize("O3"))) static nrc_err_t
 emac_enc28j60_transmit(esp_eth_mac_t* mac, uint8_t* buf, uint32_t length)
 {
@@ -1508,12 +1527,7 @@ emac_enc28j60_transmit(esp_eth_mac_t* mac, uint8_t* buf, uint32_t length)
         return NRC_FAIL;
     }
 #endif
-    V(TT_NET, "[%s] checking if last transmit completed.\n", __func__);
-    /* Check if last transmit complete */
-    MAC_CHECK(enc28j60_do_register_read(emac, true, ENC28J60_ECON1, &econ1) == NRC_SUCCESS,
-              "read ECON1 failed", out, NRC_FAIL);
-    V(TT_NET, "[%s] ENC28J60_ECON1 returned = 0x%x\n", __func__, econ1);
-    MAC_CHECK(!(econ1 & ECON1_TXRTS), "last transmit still in progress", out, NRC_FAIL);
+    MAC_CHECK(wait_for_transmit_completion(emac) == NRC_SUCCESS, "transmission busy", out, NRC_FAIL);
 
     /* Set the write pointer to start of transmit buffer area */
     MAC_CHECK(enc28j60_register_write(emac, ENC28J60_EWRPTL, ENC28J60_BUF_TX_START & 0xFF) == NRC_SUCCESS,
@@ -1575,9 +1589,25 @@ emac_enc28j60_receive(esp_eth_mac_t* mac, uint8_t* buf, uint32_t* length)
     V(TT_NET, "[%s] rx_len = %d.\n", __func__, rx_len);
     if ((rx_len <= 0) || (rx_len > ETH_MAX_PACKET_SIZE)) {
         E(TT_NET, "[%s] Error invalid receive length %d\n", __func__, rx_len);
-        enc28j60_do_reset(emac);
-		ret = NRC_FAIL;
-		goto out;
+
+        MAC_CHECK_NO_RET(
+          enc28j60_do_bitwise_set(emac, ENC28J60_ECON1, ECON1_RXRST) == NRC_SUCCESS,
+          "set RXRST failed",
+          out);
+
+        MAC_CHECK_NO_RET(
+          enc28j60_do_bitwise_clr(emac, ENC28J60_ECON1, ECON1_RXRST) == NRC_SUCCESS,
+          "clear RXRST failed",
+          out);
+
+        // Clear Rx Error Interrupt Flag
+        MAC_CHECK_NO_RET(
+          enc28j60_do_bitwise_clr(emac, ENC28J60_EIR, EIR_RXERIF) == NRC_SUCCESS,
+          "clear RXERIF failed",
+          out);
+
+        return NRC_FAIL;
+
     }
     next_packet_addr = header.next_packet_low + (header.next_packet_high << 8);
 
