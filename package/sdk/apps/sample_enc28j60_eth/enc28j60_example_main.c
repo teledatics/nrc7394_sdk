@@ -304,7 +304,7 @@ void user_init(void)
 	enc28j60_spi.pin_sclk = 15;
 #endif
 	enc28j60_spi.frame_bits = SPI_BIT8;
-	enc28j60_spi.clock = 10000000;//16000000;
+	enc28j60_spi.clock = 16000000;
 	enc28j60_spi.mode = SPI_MODE0;
 	enc28j60_spi.controller = SPI_CONTROLLER_SPI0;
 	enc28j60_spi.irq_save_flag = 0;

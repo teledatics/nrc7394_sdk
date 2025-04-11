@@ -15,11 +15,8 @@
 #include "api_dma.h"
 #include "api_spi_dma.h"
 
-#define TX_WAIT_TIMEOUT_MS 10
-#define MAX_RETRY_COUNT 10
-#define MAX_REG_RETRY_COUNT 1000
 // #define ETHERNET_SPI_DMA 1
-#undef ENABLE_ETHERNET_INTERRUPT
+// #undef ENABLE_ETHERNET_INTERRUPT
 // #define ENABLE_ETHERNET_INTERRUPT 1
 
 #define ETHERNET_DYNAMIC_BUFFERS 1
@@ -28,6 +25,10 @@ uint8_t spi_transfer_buf[SPI_TRANSFER_BUF_LEN];
 #else
 uint8_t *spi_transfer_buf;
 #endif
+
+#define TX_WAIT_TIMEOUT_MS  10
+#define MAX_RETRY_COUNT     10
+#define MAX_REG_RETRY_COUNT 1000
 
 #define delay_us(x) vTaskDelay(pdMS_TO_TICKS(x) / 1000)
 
@@ -1086,28 +1087,17 @@ emac_enc28j60_start(esp_eth_mac_t* mac)
   emac_enc28j60_t* emac = __containerof(mac, emac_enc28j60_t, parent);
   /* enable interrupt */
   MAC_CHECK(enc28j60_do_bitwise_clr(emac, ENC28J60_EIR, 0xFF) == NRC_SUCCESS,
-            "clear EIR failed",
-            out,
-            NRC_FAIL);
-  MAC_CHECK(enc28j60_do_bitwise_set(
-              emac, ENC28J60_EIE, EIE_PKTIE | EIE_INTIE | EIE_TXERIE) == NRC_SUCCESS,
-            "set EIE.[PKTIE|INTIE] failed",
-            out,
-            NRC_FAIL);
+              "clear EIR failed", out, NRC_FAIL);
+  MAC_CHECK(enc28j60_do_bitwise_set(emac, ENC28J60_EIE, EIE_PKTIE | EIE_INTIE | EIE_TXERIE) == NRC_SUCCESS,
+              "set EIE.[PKTIE|INTIE] failed", out, NRC_FAIL);
   /* enable rx logic */
   MAC_CHECK(enc28j60_do_bitwise_set(emac, ENC28J60_ECON1, ECON1_RXEN) == NRC_SUCCESS,
-            "set ECON1.RXEN failed",
-            out,
-            NRC_FAIL);
+              "set ECON1.RXEN failed", out, NRC_FAIL);
 
   MAC_CHECK(enc28j60_register_write(emac, ENC28J60_ERDPTL, 0x00) == NRC_SUCCESS,
-            "write ERDPTL failed",
-            out,
-            NRC_FAIL);
+              "write ERDPTL failed", out, NRC_FAIL);
   MAC_CHECK(enc28j60_register_write(emac, ENC28J60_ERDPTH, 0x00) == NRC_SUCCESS,
-            "write ERDPTH failed",
-            out,
-            NRC_FAIL);
+              "write ERDPTH failed", out, NRC_FAIL);
 out:
   return ret;
 }
@@ -1171,26 +1161,16 @@ emac_enc28j60_get_tsv(emac_enc28j60_t* emac, enc28j60_tsv_t* tsv)
 }
 
 #ifdef ENABLE_ETHERNET_INTERRUPT
-ATTR_NC __attribute__((optimize("O3"))) static void
-enc28j60_isr_handler(int vector)
+ATTR_NC __attribute__((optimize("O3"))) static void enc28j60_isr_handler(void *arg)
 {
-  emac_enc28j60_t* emac = gemac; //(emac_enc28j60_t *)arg;
-  BaseType_t high_task_wakeup = pdFALSE;
-  int input_high = 0;
-  
-  if (nrc_gpio_inputb(gemac->int_gpio_num, &input_high) != NRC_SUCCESS || input_high == 1) {
-    return;
-  }
+    emac_enc28j60_t *emac = (emac_enc28j60_t *)arg;
+    BaseType_t high_task_wakeup = pdFALSE;
 
-  gemac->interrupt_vector = vector;
-  system_irq_mask(gemac->interrupt_vector);
-
-  /* notify enc28j60 task */
-  vTaskNotifyGiveFromISR(emac->rx_task_hdl, &high_task_wakeup);
-
-  if (high_task_wakeup != pdFALSE) {
-    portYIELD_FROM_ISR(high_task_wakeup);
-  }
+    /* notify enc28j60 task */
+    vTaskNotifyGiveFromISR(emac->rx_task_hdl, &high_task_wakeup);
+    if (high_task_wakeup != pdFALSE) {
+        portYIELD_FROM_ISR(high_task_wakeup);
+    }
 }
 #endif
 
@@ -1219,7 +1199,6 @@ emac_enc28j60_task(void* arg)
     if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY) == 0) { // ...and no interrupt asserted
         nrc_gpio_inputb(emac->int_gpio_num, &int_bit);
         if (int_bit == 1) {
-          // emac_enc28j60_sanity_check(emac);
           continue;                          // -> just continue to check again
         }
     }
@@ -1228,14 +1207,13 @@ emac_enc28j60_task(void* arg)
     vTaskDelay(pdMS_TO_TICKS(1000) / 40);
     nrc_gpio_inputb(emac->int_gpio_num, &int_bit);
     if (int_bit == 1) {
-      // emac_enc28j60_sanity_check(emac);
       continue;
     }
 #endif
 
     V(TT_NET, "[%s] interrupt asserted bit = %d\n", __func__, int_bit);
     // the host controller should clear the global enable bit for the interrupt pin before servicing the interrupt
-    MAC_CHECK_NO_RET(enc28j60_do_bitwise_clr(emac, ENC28J60_EIR, EIE_INTIE) == NRC_SUCCESS,
+    MAC_CHECK_NO_RET(enc28j60_do_bitwise_clr(emac, ENC28J60_EIE, EIE_INTIE) == NRC_SUCCESS,
                         "clear EIE_INTIE failed", loop_start);        // read interrupt status
     MAC_CHECK_NO_RET(enc28j60_do_register_read(emac, true, ENC28J60_EIR, &status) == NRC_SUCCESS,
                         "read EIR failed", loop_end);
@@ -1261,6 +1239,7 @@ emac_enc28j60_task(void* arg)
       if (pk_counter > 0) {
         status = EIR_PKTIF;
       } else {
+        V(TT_NET, "[%s] goto loop_end...\n", __func__);
         goto loop_end;
       }
     }
@@ -1371,6 +1350,10 @@ loop_next:
                        "clear TXIE failed",
                        loop_end);
 
+#ifdef ENABLE_ETHERNET_INTERRUPT
+      V(TT_NET, "[%s] xSemaphoreGive(emac->tx_ready_sem)\n", __func__);
+      xSemaphoreGive(emac->tx_ready_sem);
+#endif
     }
   loop_end:
     // restore global enable interrupt bit
@@ -1380,11 +1363,7 @@ loop_next:
                      loop_start);
     // Note: Interrupt flag PKTIF is cleared when PKTDEC is set (in receive
     // function)
-    
-#ifdef ENABLE_ETHERNET_INTERRUPT
-            V(TT_NET, "[%s] xSemaphoreGive(emac->tx_ready_sem)\n", __func__);
-            xSemaphoreGive(emac->tx_ready_sem);
-#endif
+
   }
 
   vTaskDelete(NULL);
@@ -1419,7 +1398,7 @@ emac_enc28j60_set_speed(esp_eth_mac_t* mac, eth_speed_t speed)
 
   switch (speed) {
     case ETH_SPEED_10M:
-      // ESP_LOGI(TAG, "working in 10Mbps");
+      I(TT_NET, "[%s] working in 10Mbps\n", __func__);
       break;
     default:
       MAC_CHECK(false, "100Mbps unsupported", out, NRC_FAIL);
@@ -1447,7 +1426,7 @@ emac_enc28j60_set_duplex(esp_eth_mac_t* mac, eth_duplex_t duplex)
                 "write MABBIPG failed",
                 out,
                 NRC_FAIL);
-      // ESP_LOGI(TAG, "working in half duplex");
+      I(TT_NET, "[%s] working in half duplex\n", __func__);
       break;
     case ETH_DUPLEX_FULL:
       mac3 |= MACON3_FULDPX;
@@ -1455,7 +1434,7 @@ emac_enc28j60_set_duplex(esp_eth_mac_t* mac, eth_duplex_t duplex)
                 "write MABBIPG failed",
                 out,
                 NRC_FAIL);
-      // ESP_LOGI(TAG, "working in full duplex");
+      I(TT_NET, "[%s] working in full duplex\n", __func__);
       break;
     default:
       MAC_CHECK(false, "unknown duplex", out, NRC_FAIL);
@@ -1492,6 +1471,8 @@ wait_for_transmit_completion(emac_enc28j60_t *emac)
   uint8_t econ1 = 0;
   uint32_t timeout = xTaskGetTickCount() + pdMS_TO_TICKS(TX_WAIT_TIMEOUT_MS);
 
+  V(TT_NET, "[%s] checking if last transmit completed.\n", __func__);
+
   do {
     /* Check if last transmit complete */
     MAC_CHECK(enc28j60_do_register_read(emac, true, ENC28J60_ECON1, &econ1) == NRC_SUCCESS,
@@ -1502,6 +1483,8 @@ wait_for_transmit_completion(emac_enc28j60_t *emac)
 
         if (xTaskGetTickCount() >= timeout) {
             E(TT_NET, "timeout expired, transmission stuck");
+            MAC_CHECK(enc28j60_do_bitwise_clr(emac, ENC28J60_ECON1, ECON1_TXRTS) == NRC_SUCCESS,
+              "set ECON1.TXRTS failed", out, NRC_FAIL);
             return NRC_FAIL;
         }
 
@@ -1521,12 +1504,12 @@ emac_enc28j60_transmit(esp_eth_mac_t* mac, uint8_t* buf, uint32_t length)
     uint8_t econ1 = 0;
 
 #ifdef ENABLE_ETHERNET_INTERRUPT
-    /* ENC28J60 may be a bottle neck in eth communication. Hence we need to check if it is ready. */
-    if (xSemaphoreTake(emac->tx_ready_sem, pdMS_TO_TICKS(ENC28J60_TX_READY_TIMEOUT_MS)) == pdFALSE) {
-        E(TT_NET, "tx_ready_sem expired");
-        return NRC_FAIL;
-    }
+    // /* ENC28J60 may be a bottle neck in Eth communication. Hence we need to check if it is ready. */
+    // if (xSemaphoreTake(emac->tx_ready_sem, pdMS_TO_TICKS(ENC28J60_TX_READY_TIMEOUT_MS)) == pdFALSE) {
+    //     E(TT_NET, "tx_ready_sem expired\n");
+    // }
 #endif
+
     MAC_CHECK(wait_for_transmit_completion(emac) == NRC_SUCCESS, "transmission busy", out, NRC_FAIL);
 
     /* Set the write pointer to start of transmit buffer area */
@@ -1667,6 +1650,26 @@ ATTR_NC __attribute__((optimize("O3"))) static nrc_err_t init_dynamic_buffers(vo
 }
 #endif
 
+#ifdef ENABLE_ETHERNET_INTERRUPT
+static void enc28j60_intr_handler(int vector)
+{
+    int input;
+
+    gemac->interrupt_vector = vector;
+    if (nrc_gpio_inputb(gemac->int_gpio_num, &input) < 0) {
+        return;
+    }
+
+    if (!input) {
+        V(TT_NET, "[%s] call enc28j60_isr_handler\n", __func__);
+        system_irq_mask(gemac->interrupt_vector);
+        enc28j60_isr_handler(gemac);
+    } else {
+        V(TT_NET, "[%s] bogus interrupt\n", __func__);
+    }
+}
+#endif
+
 ATTR_NC __attribute__((optimize("O3"))) static nrc_err_t
 emac_enc28j60_init(esp_eth_mac_t* mac)
 {
@@ -1674,6 +1677,8 @@ emac_enc28j60_init(esp_eth_mac_t* mac)
   emac_enc28j60_t* emac = __containerof(mac, emac_enc28j60_t, parent);
   esp_eth_mediator_t* eth = emac->eth;
 
+  // util_trace_set_log_level(TT_NET, 0);
+  
   /* gpio used for enc28j60 reset */
   // enc28j60_gpio_config(GPIO_10, false);
 
@@ -1691,27 +1696,19 @@ emac_enc28j60_init(esp_eth_mac_t* mac)
             "lowlevel init failed",
             out,
             NRC_FAIL);
-
+  
   /* reset enc28j60 */
-  MAC_CHECK(
-    enc28j60_do_reset(emac) == NRC_SUCCESS, "reset enc28j60 failed", out, NRC_FAIL);
+  MAC_CHECK(enc28j60_do_reset(emac) == NRC_SUCCESS, "reset enc28j60 failed", out, NRC_FAIL);
   /* verify chip id */
-  MAC_CHECK(
-    enc28j60_verify_id(emac) == NRC_SUCCESS, "verify chip ID failed", out, NRC_FAIL);
+  MAC_CHECK(enc28j60_verify_id(emac) == NRC_SUCCESS, "verify chip ID failed", out, NRC_FAIL);
   /* default setup of internal registers */
-  MAC_CHECK(enc28j60_setup_default(emac) == NRC_SUCCESS,
-            "enc28j60 default setup failed",
-            out,
-            NRC_FAIL);
+  MAC_CHECK(enc28j60_setup_default(emac) == NRC_SUCCESS, "enc28j60 default setup failed", out, NRC_FAIL);
   /* clear multicast hash table */
-  MAC_CHECK(enc28j60_clear_multicast_table(emac) == NRC_SUCCESS,
-            "clear multicast table failed",
-            out,
-            NRC_FAIL);
+  MAC_CHECK(enc28j60_clear_multicast_table(emac) == NRC_SUCCESS, "clear multicast table failed", out, NRC_FAIL);
 
 #ifdef ENABLE_ETHERNET_INTERRUPT
-  if (nrc_gpio_register_interrupt_handler(INT_VECTOR0, emac->int_gpio_num, enc28j60_isr_handler) == NRC_SUCCESS) {
-    E(TT_NET, "[%s] interrupt handler installed\n", __func__);
+  if (nrc_gpio_register_interrupt_handler(INT_VECTOR0, emac->int_gpio_num, enc28j60_intr_handler) == NRC_SUCCESS) {
+    V(TT_NET, "[%s] interrupt handler installed\n", __func__);
   }
 #endif
 
