@@ -61,6 +61,10 @@ err_t low_level_init(struct netif *netif)
 #if LWIP_IPV6 && LWIP_IPV6_MLD
 	netif->flags |= NETIF_FLAG_MLD6;
 #endif /* LWIP_IPV6 && LWIP_IPV6_MLD */
+	
+#ifdef LWIP_PROXYARP
+	netif->flags |= NETIF_FLAG_PROXYARP;
+#endif
 
 	return ERR_OK;
 }

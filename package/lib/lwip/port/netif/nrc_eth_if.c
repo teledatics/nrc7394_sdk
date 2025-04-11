@@ -125,7 +125,9 @@ static err_t eth_init( struct netif *netif )
 
 	/* broadcast capability */
 	netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_LINK_UP;
-
+#ifdef LWIP_PROXYARP
+	netif->flags |= NETIF_FLAG_PROXYARP;
+#endif
 	return ERR_OK;
 }
 
