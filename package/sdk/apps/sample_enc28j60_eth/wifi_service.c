@@ -61,7 +61,7 @@ nrc_err_t connect_to_ap(WIFI_CONFIG* param)
 		return NRC_FAIL;
 	}
 
-//	nrc_usr_print("[%s] setting wifi interface to promiscuous mode...\n",__func__);
-//	system_api_set_promiscuous_mode(true);
+	nrc_usr_print("[%s] setting wifi interface to promiscuous mode...\n",__func__);
+	system_api_set_promiscuous_mode(true);
 	return NRC_SUCCESS;
 }

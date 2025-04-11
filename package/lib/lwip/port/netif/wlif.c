@@ -147,6 +147,7 @@ void lwif_input(struct nrc_wpa_if* intf, void *buffer, int data_len)
 	struct ip_hdr *ip_hdr;
 
 	V(TT_NET, "[%s] input length = %d...\n", __func__, data_len);
+	
 	p = pbuf_alloc( PBUF_RAW, len, PBUF_POOL );
 
 	if( p != NULL )
@@ -210,6 +211,17 @@ void lwif_input(struct nrc_wpa_if* intf, void *buffer, int data_len)
 				goto next;
 			}
 #endif
+#ifdef LWIP_PROXYARP
+			if (htons(ethhdr->type) == ETHTYPE_ARP) {
+				struct etharp_hdr *arp_hdr = (struct etharp_hdr *)(p->payload + SIZEOF_ETH_HDR);
+				ip4_addr_t arp_src_ip;
+
+				arp_src_ip.addr = ((u32_t)(lwip_ntohs(arp_hdr->sipaddr.addrw[0])) << 16) |
+						   (u32_t)(lwip_ntohs(arp_hdr->sipaddr.addrw[1]));
+
+				proxy_arp_learn(&arp_src_ip, (struct eth_addr*)arp_hdr->shwaddr.addr, netif);
+			}
+#endif /* LWIP_PROXYARP */
 #if PPPOE_SUPPORT
 		/* PPPoE packet? */
 		case ETHTYPE_PPPOEDISC:

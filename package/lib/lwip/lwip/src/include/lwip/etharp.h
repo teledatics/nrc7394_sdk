@@ -95,6 +95,23 @@ err_t etharp_remove_static_entry(const ip4_addr_t *ipaddr);
 
 void etharp_input(struct pbuf *p, struct netif *netif);
 
+#ifdef LWIP_PROXYARP
+
+#define MAX_PROXY_ARP_ENTRIES 32
+#define PROXY_ARP_ENTRY_AGE_SEC 300  // 5 minutes
+
+typedef struct {
+    ip4_addr_t ip;
+    struct eth_addr mac;
+    struct netif* netif;  // Interface where this host was seen
+    u32_t last_seen;
+    u8_t valid;
+} proxy_arp_entry_t;
+
+proxy_arp_entry_t* proxy_arp_lookup(const ip4_addr_t *ip, struct netif *requesting_netif);
+void proxy_arp_learn(const ip4_addr_t *ip, const struct eth_addr *mac, struct netif *netif);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

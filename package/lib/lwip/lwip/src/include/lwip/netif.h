@@ -106,6 +106,11 @@ extern "C" {
  * Set by the netif driver in its init function. */
 #define NETIF_FLAG_MLD6         0x40U
 
+#ifdef LWIP_PROXYARP
+/* Proxy ARP requests */
+#define NETIF_FLAG_PROXYARP     0x80U
+#endif
+
 /**
  * @}
  */

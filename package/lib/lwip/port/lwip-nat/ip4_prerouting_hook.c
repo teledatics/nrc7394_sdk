@@ -79,9 +79,11 @@ ip4_prerouting_hook(struct pbuf *p, struct netif *inp, struct netif *localp,
 			 * Packet is attempting to route in reverse direction
 			 * of existing NAT rule, eat it.
 			 */
+			ip4_debug_print("Packet is attempting to route in reverse direction of existing NAT rule, eat it\n");
 			return 1;
 		} else if (ret < 0) {
 			/* No rule found */
+			ip4_debug_print("No rule found\n");
 			return 0;
 		}
 
@@ -91,18 +93,23 @@ ip4_prerouting_hook(struct pbuf *p, struct netif *inp, struct netif *localp,
 			 * an expired message to the correct destination
 			 * don't modify anything.
 			 */
+			 ip4_debug_print("Packet cannot be forwarded. To allow LWIP to send an expired message to the correct destination don't modify anything.\n");
 			 return 0;
 		}
 
 		if (forwardp->mtu && (p->tot_len > forwardp->mtu) &&
-		    IPH_OFFSET(iphdr) & PP_NTOHS(IP_DF))
+		    IPH_OFFSET(iphdr) & PP_NTOHS(IP_DF)) {
+			ip4_debug_print(" Same as above, but for frag needed.\n");
 			/* Same as above, but for frag needed */
 			return 0;
+		}
 
 	} else if (localp && localp == inp) {
 		/* Will try to find a matching NAT rule */
+		ip4_debug_print("Will try to find a matching NAT rule.\n");
 	} else {
 		/* Ignore */
+		ip4_debug_print("Ignore.\n");
 		return 0;
 	}
 
@@ -112,6 +119,7 @@ ip4_prerouting_hook(struct pbuf *p, struct netif *inp, struct netif *localp,
 		 * Drop outbound packets that did not get NAT'd, allow
 		 * others to continue.
 		 */
+		ip4_debug_print("Drop outbound packets that did not get NAT'd, allow others to continue: forwardp %d\n");
 		return forwardp ? 1 : 0;
 	}
 
@@ -128,15 +136,18 @@ ip4_prerouting_hook(struct pbuf *p, struct netif *inp, struct netif *localp,
 		 */
 		if (IPH_TTL(iphdr) == 1) {
 #if LWIP_ICMP
-			if (IPH_PROTO(iphdr) != IP_PROTO_ICMP)
+			if (IPH_PROTO(iphdr) != IP_PROTO_ICMP){
+				ip4_debug_print("icmp_time_exceeded.\n");
 				icmp_time_exceeded(p, ICMP_TE_TTL);
+			}
 #endif
-			 return 1;
+			return 1;
 		}
 
 		if (natp->mtu && (p->tot_len > natp->mtu) &&
 		    IPH_OFFSET(iphdr) & PP_NTOHS(IP_DF)) {
 #if LWIP_ICMP
+			ip4_debug_print("icmp_dest_unreach.\n");
 			icmp_dest_unreach(p, ICMP_DUR_FRAG);
 #endif
 			return 1;

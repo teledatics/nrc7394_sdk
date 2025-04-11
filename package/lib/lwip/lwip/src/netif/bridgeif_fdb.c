@@ -90,8 +90,10 @@ bridgeif_fdb_update_src(void *fdb_ptr, struct eth_addr *src_addr, u8_t port_idx)
                                          src_addr->addr[0], src_addr->addr[1], src_addr->addr[2], src_addr->addr[3], src_addr->addr[4], src_addr->addr[5],
                                          port_idx, i));
         BRIDGEIF_WRITE_PROTECT(lev);
+#ifndef LWIP_PROXYARP
         e->ts = BR_FDB_TIMEOUT_SEC;
         e->port = port_idx;
+#endif
         BRIDGEIF_WRITE_UNPROTECT(lev);
         BRIDGEIF_READ_UNPROTECT(lev);
         return;

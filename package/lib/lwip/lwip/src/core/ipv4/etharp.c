@@ -104,6 +104,10 @@ struct etharp_entry {
 
 static struct etharp_entry arp_table[ARP_TABLE_SIZE];
 
+#ifdef LWIP_PROXYARP
+static proxy_arp_entry_t proxy_arp_table[MAX_PROXY_ARP_ENTRIES];
+#endif /* LWIP_PROXYARP */
+
 #if !LWIP_NETIF_HWADDRHINT
 static netif_addr_idx_t etharp_cached_entry;
 #endif /* !LWIP_NETIF_HWADDRHINT */
@@ -187,6 +191,96 @@ etharp_free_entry(int i)
 #endif /* LWIP_DEBUG */
 }
 
+#ifdef LWIP_PROXYARP
+#include "FreeRTOS.h"
+#include "task.h"
+
+#define PROXY_ARP_ENTRY_AGE_SEC 300  // 5 minutes
+#define MS_PER_SEC 1000
+
+// replacement for sys_now() / 1000
+static u32_t proxy_arp_now_seconds(void) {
+    return xTaskGetTickCount() / configTICK_RATE_HZ;
+}
+
+// Called periodically from etharp_tmr (every 5 sec recommended)
+static void proxy_arp_table_maintenance(void) 
+{
+    u32_t now = proxy_arp_now_seconds();
+
+    for (int i = 0; i < MAX_PROXY_ARP_ENTRIES; i++) 
+    {
+        if (proxy_arp_table[i].valid && (now - proxy_arp_table[i].last_seen > PROXY_ARP_ENTRY_AGE_SEC)) {
+            proxy_arp_table[i].valid = 0; // age out entry
+        }
+    }
+}
+
+void proxy_arp_learn(const ip4_addr_t *ip, const struct eth_addr *mac, struct netif *netif)
+{
+    int i, oldest = -1;
+    u32_t oldest_time = 0xFFFFFFFF;
+    u32_t now = proxy_arp_now_seconds();
+
+    for (i = 0; i < MAX_PROXY_ARP_ENTRIES; i++) 
+    {
+        if (proxy_arp_table[i].valid) {
+            if (ip4_addr_cmp(&proxy_arp_table[i].ip, ip)) {
+                proxy_arp_table[i].last_seen = now;
+                proxy_arp_table[i].netif = netif;
+                MEMCPY(&proxy_arp_table[i].mac, mac, sizeof(struct eth_addr));
+                LWIP_DEBUGF(PROXYARP_DEBUG, ("[%s] Updated entry %u.%u.%u.%u\n",
+                    __func__, ip4_addr1(ip), ip4_addr2(ip), ip4_addr3(ip), ip4_addr4(ip)));
+                return;
+            }
+            if (proxy_arp_table[i].last_seen < oldest_time) {
+                oldest_time = proxy_arp_table[i].last_seen;
+                oldest = i;
+            }
+        } else if (oldest == -1) {
+            oldest = i; // explicitly first available free slot
+        }
+    }
+
+    if (oldest >= 0) {
+        proxy_arp_table[oldest].valid = 1;
+        ip4_addr_copy(proxy_arp_table[oldest].ip, *ip);
+        proxy_arp_table[oldest].last_seen = now;
+        proxy_arp_table[oldest].netif = netif;
+        MEMCPY(&proxy_arp_table[oldest].mac, mac, sizeof(struct eth_addr));
+        LWIP_DEBUGF(PROXYARP_DEBUG, ("[%s] Added entry %u.%u.%u.%u\n",
+            __func__, ip4_addr1(ip), ip4_addr2(ip), ip4_addr3(ip), ip4_addr4(ip)));
+    }
+}
+
+proxy_arp_entry_t* proxy_arp_lookup(const ip4_addr_t *ip, struct netif *requesting_netif) 
+{
+    for (int i = 0; i < MAX_PROXY_ARP_ENTRIES; i++) {
+        if (proxy_arp_table[i].valid && ip4_addr_cmp(&proxy_arp_table[i].ip, ip)) {
+            if (!requesting_netif || proxy_arp_table[i].netif != requesting_netif) {
+                LWIP_DEBUGF(PROXYARP_DEBUG, ("[%s] Found entry %u.%u.%u.%u\n",
+                __func__, ip4_addr1(&proxy_arp_table[i].ip), ip4_addr2(&proxy_arp_table[i].ip), ip4_addr3(&proxy_arp_table[i].ip), ip4_addr4(&proxy_arp_table[i].ip)));
+                return &proxy_arp_table[i];
+            }
+        }
+    }
+    return NULL;
+}
+
+#define LWIP_HOOK_IP4_ROUTE(dest) proxyarp_route_hook(dest)
+
+// Define proxyarp_route_hook near proxy ARP code:
+struct netif* proxyarp_route_hook(const ip4_addr_t *dest) 
+{
+    proxy_arp_entry_t *entry = proxy_arp_lookup(dest, NULL);
+    LWIP_DEBUGF(PROXYARP_DEBUG, ("[proxyarp_route_hook] lookup %u.%u.%u.%u: %s\n",
+        ip4_addr1(dest), ip4_addr2(dest), ip4_addr3(dest), ip4_addr4(dest),
+        entry ? "found" : "not found"));
+    return entry ? entry->netif : NULL;
+}
+
+#endif /* LWIP_PROXYARP */
+
 /**
  * Clears expired entries in the ARP table.
  *
@@ -229,6 +323,10 @@ etharp_tmr(void)
       }
     }
   }
+#ifdef LWIP_PROXYARP
+  proxy_arp_table_maintenance();
+#endif
+  
 }
 
 /**
@@ -717,8 +815,25 @@ etharp_input(struct pbuf *p, struct netif *netif)
         LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE, ("etharp_input: we are unconfigured, ARP request ignored.\n"));
         /* request was not directed to us */
       } else {
+#ifdef LWIP_PROXYARP
+        proxy_arp_entry_t *entry = proxy_arp_lookup(&dipaddr, netif);
+        if (entry) {
+          LWIP_DEBUGF(PROXYARP_DEBUG, ("Proxy ARP reply for %u.%u.%u.%u\n", ip4_addr1(&dipaddr), ip4_addr2(&dipaddr), ip4_addr3(&dipaddr), ip4_addr4(&dipaddr)));
+        
+          etharp_raw(netif,
+                   (struct eth_addr*)netif->hwaddr,    // eth src (local netif MAC)
+                   &hdr->shwaddr, // eth dst (requester MAC)
+                   (struct eth_addr*)netif->hwaddr,    // ARP sender MAC (our MAC)
+                   &dipaddr,                         // ARP sender IP (target host IP)
+                   &hdr->shwaddr, // ARP target MAC (requester MAC)
+                   &sipaddr,                         // ARP target IP (requester IP)
+                   ARP_REPLY);
+        }
+        else
+#endif
         /* { for_us == 0 and netif->ip_addr.addr != 0 } */
         LWIP_DEBUGF(ETHARP_DEBUG | LWIP_DBG_TRACE, ("etharp_input: ARP request was not for us.\n"));
+
       }
       break;
     case PP_HTONS(ARP_REPLY):

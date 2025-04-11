@@ -151,6 +151,23 @@ static nrc_err_t get_user_factory_data(user_factory_t* data)
 			data->eth_mac[0], data->eth_mac[1], data->eth_mac[2],
 			data->eth_mac[3], data->eth_mac[4], data->eth_mac[5]);
 	}
+	
+	if(memcmp(data->eth_mac, "\x00\x00\x00\x00\x00\x00", 6) == 0){
+		
+		uint16_t random_bits;
+		
+		srand(xTaskGetTickCount());
+		random_bits = rand() & 0x0FFF;
+		
+		// Set Teledatics IEEE reserved MAC
+		data->eth_mac[0] = 0x8C;
+		data->eth_mac[1] = 0x1F;
+		data->eth_mac[2] = 0x64;
+		data->eth_mac[3] = 0xAC;
+		data->eth_mac[4] = 0x80 | ((random_bits >> 8) & 0x0F);
+		data->eth_mac[5] = random_bits & 0xFF;
+	}
+	
 	return ret;
 }
 #endif
@@ -287,7 +304,7 @@ void user_init(void)
 	enc28j60_spi.pin_sclk = 15;
 #endif
 	enc28j60_spi.frame_bits = SPI_BIT8;
-	enc28j60_spi.clock = 16000000;
+	enc28j60_spi.clock = 10000000;//16000000;
 	enc28j60_spi.mode = SPI_MODE0;
 	enc28j60_spi.controller = SPI_CONTROLLER_SPI0;
 	enc28j60_spi.irq_save_flag = 0;
@@ -295,7 +312,14 @@ void user_init(void)
 
 	// nrc_led_trx_init(TX_LED_GPIO, RX_LED_GPIO, 500, false);
 
-	nrc_eth_set_network_mode(NRC_NETWORK_MODE_BRIDGE);
+	if(wifi_config.device_mode) {
+		nrc_eth_set_network_mode(NRC_NETWORK_MODE_NAT);
+	}
+	else {
+		nrc_eth_set_network_mode(NRC_NETWORK_MODE_BRIDGE);
+	}
+	
+	nrc_usr_print("[%s] Network mode %s\n", __func__, (wifi_config.device_mode == NRC_NETWORK_MODE_NAT) ? "nat" : "bridge");
 	
 	run_http_server(&wifi_config);
 
@@ -316,7 +340,7 @@ void user_init(void)
 			(memcmp(addr, "\x00\x00\x00\x00\x00\x00", 6) == 0)) {
 			addr = NULL;
 		}
-	}
+	}	
 #endif
 
 	// runStats();

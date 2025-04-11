@@ -67,7 +67,7 @@ extern int ip4_input_nat(struct pbuf *p, struct netif *inp);
 #endif /* SUPPORT_ETHERNET_ACCESSPOINT */
 #if LWIP_BRIDGE
 #define BRIDGEIF_PORT_NETIFS_OUTPUT_DIRECT 1
-#define BRIDGEIF_MAX_PORTS 2
+#define BRIDGEIF_MAX_PORTS 3
 #endif /* LWIP_BRIDGE */
 
 /* IP4 is default */
@@ -138,6 +138,8 @@ extern int ip4_input_nat(struct pbuf *p, struct netif *inp);
 #define DHCP6_DEBUG                LWIP_DBG_OFF
 #define RAW_DEBUG                  LWIP_DBG_OFF
 #define SNTP_DEBUG                 LWIP_DBG_OFF
+#define NAT_DEBUG                  LWIP_DBG_OFF
+#define PROXYARP_DEBUG             LWIP_DBG_OFF
 #endif
 
 #define LWIP_DBG_TYPES_ON (LWIP_DBG_ON|LWIP_DBG_TRACE|\
@@ -323,6 +325,7 @@ a lot of data that needs to be copied, this should be set high. */
    IP packets across network interfaces. If you are going to run lwIP
    on a device with only one network interface, define this to 0. */
 #define IP_FORWARD              1
+#define IP_FORWARD_ALLOW_TX_ON_RX_NETIF 1
 
 /* IP reassembly and segmentation.These are orthogonal even
  * if they both deal with IP fragments */
@@ -400,6 +403,9 @@ a lot of data that needs to be copied, this should be set high. */
 
 /* LWIP_BRIDGE==1: Enable bridge interface application */
 #define LWIP_BRIDGE            1
+
+/* LWIP_BRIDGE==1: Enable bridge interface application */
+#define LWIP_PROXYARP         1
 
 /* define for sys_arch.c */
 #define LWIP_FREERTOS_THREAD_STACKSIZE_IS_STACKWORDS  1

@@ -16,7 +16,7 @@ static const char* TAG = "enc28j60";
 #define PHY_CHECK(a, str, goto_tag, ...)                                       \
   do {                                                                         \
     if (!(a)) {                                                                \
-      nrc_usr_print("%s (%d): " str, __FUNCTION__, __LINE__, ##__VA_ARGS__);   \
+      E(TT_NET, "%s (%d): " str, __FUNCTION__, __LINE__, ##__VA_ARGS__);   \
       goto goto_tag;                                                           \
     }                                                                          \
   } while (0)
@@ -224,10 +224,6 @@ enc28j60_reset_hw(esp_eth_phy_t* phy)
     enc28j60_reset_config(enc28j60->reset_gpio_num);
     nrc_gpio_outputb(enc28j60->reset_gpio_num, 0);
     nrc_gpio_outputb(enc28j60->reset_gpio_num, 1);
-    //         gpio_reset_pin(enc28j60->reset_gpio_num);
-    //         gpio_set_direction(enc28j60->reset_gpio_num, GPIO_MODE_OUTPUT);
-    //         gpio_set_level(enc28j60->reset_gpio_num, 0);
-    //         gpio_set_level(enc28j60->reset_gpio_num, 1);
   }
   return NRC_SUCCESS;
 }
@@ -415,13 +411,11 @@ enc28j60_init(esp_eth_phy_t* phy)
               eth, enc28j60->addr, ETH_PHY_IDR2_REG_ADDR, &(id2.val)) == NRC_SUCCESS,
             "read ID2 failed",
             err);
-  nrc_usr_print("[%s] compiled %s %s\n", __func__, __DATE__, __TIME__);
-  nrc_usr_print("[%s] id1.oui_msb 0x%X == 0x0083 && id2.oui_lsb 0x%X == 0x05 && id2.vendor_model 0x%X == 0x00\n", __func__, id1.oui_msb, id2.oui_lsb, id2.vendor_model);
 
-  // PHY_CHECK(id1.oui_msb == 0x0083 && id2.oui_lsb == 0x05 &&
-  //             id2.vendor_model == 0x00,
-  //           "wrong chip ID",
-  //           err);
+  PHY_CHECK(id1.oui_msb == 0x0083 && id2.oui_lsb == 0x05 &&
+              id2.vendor_model == 0x00,
+            "wrong chip ID",
+            err);
   
   /* Disable half duplex loopback */
   phcon2_reg_t phcon2;

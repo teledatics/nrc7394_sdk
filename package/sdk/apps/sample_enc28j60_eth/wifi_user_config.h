@@ -15,7 +15,7 @@
 */
 
 #define WIFI_DEVICE_MODE 1 // STA(0), AP(1)
-#define WIFI_NETWORK_MODE 1 // Bridge(0), NAT(1)
+#define WIFI_NETWORK_MODE 0 // Bridge(0), NAT(1)
 #define NRC_WIFI_IP_MODE	WIFI_STATIC_IP
 #define NRC_WIFI_SOFTAP_DHCP_SERVER	0 // 0(off), 1(on)
 #define NRC_STATIC_IP "192.168.200.1"
@@ -28,7 +28,7 @@
 #define NRC_WIFI_SOFTAP_MAX_NUM_STA_DEFAULT 10
 
 #define WIFI_MAX_TXPOWER 30
-#define TX_POWER 29
+#define TX_POWER 27
 #define TX_POWER_TYPE 2
 
 #endif // __WIFI_USER_CONFIG_H__ //

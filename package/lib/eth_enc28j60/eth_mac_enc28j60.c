@@ -18,6 +18,7 @@
 #define MAX_RETRY_COUNT 10
 // #define ETHERNET_SPI_DMA 1
 #undef ENABLE_ETHERNET_INTERRUPT
+// #define ENABLE_ETHERNET_INTERRUPT 1
 
 #define ETHERNET_DYNAMIC_BUFFERS 1
 #ifndef ETHERNET_DYNAMIC_BUFFERS
@@ -26,14 +27,14 @@ uint8_t spi_transfer_buf[SPI_TRANSFER_BUF_LEN];
 uint8_t *spi_transfer_buf;
 #endif
 
-#define esp_rom_delay_us(x) vTaskDelay(pdMS_TO_TICKS(x) / 1000)
+#define delay_us(x) vTaskDelay(pdMS_TO_TICKS(x) / 1000)
 
 static const char* TAG = "enc28j60";
 
 #define MAC_CHECK(a, str, goto_tag, ret_value, ...)                            \
   do {                                                                         \
     if (!(a)) {                                                                \
-      nrc_usr_print("%s (%d): " str "\n", __FUNCTION__, __LINE__, ##__VA_ARGS__); \
+      E(TT_NET, "%s (%d): " str "\n", __FUNCTION__, __LINE__, ##__VA_ARGS__); \
       ret = ret_value;                                                         \
       goto goto_tag;                                                           \
     }                                                                          \
@@ -42,7 +43,7 @@ static const char* TAG = "enc28j60";
 #define MAC_CHECK_NO_RET(a, str, goto_tag, ...)                                \
   do {                                                                         \
     if (!(a)) {                                                                \
-      nrc_usr_print("%s (%d):" str  "\n", __FUNCTION__, __LINE__, ##__VA_ARGS__); \
+      E(TT_NET, "%s (%d):" str  "\n", __FUNCTION__, __LINE__, ##__VA_ARGS__); \
       goto goto_tag;                                                           \
     }                                                                          \
   } while (0)
@@ -208,6 +209,8 @@ spi_read_op(spi_device_t* spi, u8 op, u8 addr)
   memset(tx_buf, 0, sizeof(tx_buf));
   nrc_spi_xfer(spi, tx_buf, rx_buf, slen);
   nrc_spi_stop_xfer(spi);
+  
+  delay_us(100);
 
   return val = rx_buf[slen - 1];
 }
@@ -225,6 +228,8 @@ spi_write_op(spi_device_t* spi, u8 op, u8 addr, u8 val)
   nrc_spi_start_xfer(spi);
   ret = nrc_spi_xfer(spi, spi_transfer_buf, spi_transfer_buf, 2);
   nrc_spi_stop_xfer(spi);
+  
+  delay_us(100);
 
   return ret;
 }
@@ -239,6 +244,8 @@ spi_write(spi_device_t* spi, u8* data, int len)
   nrc_spi_start_xfer(spi);
   ret = nrc_spi_xfer(spi, data, data, len);
   nrc_spi_stop_xfer(spi);
+  
+  delay_us(100);
 
   enc28j60_spi_unlock(gemac);
   
@@ -282,14 +289,12 @@ spi_read_buf(spi_device_t* spi, int len, u8* data)
   }
   nrc_spi_stop_xfer(spi);
 
+  delay_us(100);
+  
   if (ret == 0) {
     memcpy(data, &rx_buf[1], len);
-    		// nrc_usr_print("[%s] len %d: ", __func__, len);
-    		// while(len--)
-    		// 	nrc_usr_print("0x%02X ", *data++);
-    		// nrc_usr_print("\n");
   } else {
-    nrc_usr_print("%s() failed: ret = %d\n", __func__, ret);
+    E(TT_NET, "%s() failed: ret = %d\n", __func__, ret);
   }
 
   return ret;
@@ -455,11 +460,8 @@ enc28j60_init_spi(spi_device_t* spi_dev)
   int ret;
 
   ret = nrc_spi_init_cs(spi_dev->pin_cs);
-  nrc_usr_print("[%s] nrc_spi_init_cs ret %d\n", __func__, ret);
   ret = nrc_spi_master_init(spi_dev);
-  nrc_usr_print("[%s] nrc_spi_master_init ret %d\n", __func__, ret);
   ret = nrc_spi_enable(spi_dev, true);
-  nrc_usr_print("[%s] nrc_spi_enable ret %d\n", __func__, ret);
   _delay_ms(100);
 }
 
@@ -509,7 +511,7 @@ enc28j60_do_register_read(emac_enc28j60_t* emac,
     .flags = SPI_TRANS_USE_RXDATA
   };
 
-  esp_rom_delay_us(15);
+  delay_us(15);
 
   if (enc28j60_spi_lock(emac)) {
     if (spi_device_transmit(emac->spi_hdl, &trans) != NRC_SUCCESS) {
@@ -648,7 +650,7 @@ enc28j60_do_reset(emac_enc28j60_t* emac)
   }
 
   // After reset, wait at least 1ms for the device to be ready
-  esp_rom_delay_us(ENC28J60_SYSTEM_RESET_ADDITION_TIME_US);
+  delay_us(ENC28J60_SYSTEM_RESET_ADDITION_TIME_US);
 
   return ret;
 }
@@ -663,7 +665,7 @@ enc28j60_switch_register_bank(emac_enc28j60_t* emac, uint8_t bank)
 
   if (bank != emac->last_bank) {
 
-    esp_rom_delay_us(15);
+    delay_us(15);
 
     MAC_CHECK(enc28j60_do_bitwise_clr(emac, ENC28J60_ECON1, 0x03) == NRC_SUCCESS,
               "clear ECON1[1:0] failed",
@@ -703,7 +705,6 @@ enc28j60_register_write(emac_enc28j60_t* emac, uint16_t reg_addr, uint8_t value)
   } else {
     ret = NRC_FAIL;
   }
-  return ret;
 out:
   enc28j60_reg_trans_unlock(emac);
   return ret;
@@ -732,7 +733,6 @@ enc28j60_register_read(emac_enc28j60_t* emac, uint16_t reg_addr, uint8_t* value)
   } else {
     ret = NRC_FAIL;
   }
-  return ret;
 out:
   enc28j60_reg_trans_unlock(emac);
   return ret;
@@ -813,7 +813,7 @@ emac_enc28j60_write_phy_reg(esp_eth_mac_t* mac,
   /* polling the busy flag */
   uint32_t to = 0;
   do {
-    esp_rom_delay_us(15);
+    delay_us(15);
     MAC_CHECK(enc28j60_register_read(emac, ENC28J60_MISTAT, &mii_status) ==
                 NRC_SUCCESS,
               "read MISTAT failed",
@@ -866,7 +866,7 @@ emac_enc28j60_read_phy_reg(esp_eth_mac_t* mac,
   /* polling the busy flag */
   uint32_t to = 0;
   do {
-    esp_rom_delay_us(15);
+    delay_us(15);
     MAC_CHECK(enc28j60_register_read(emac, ENC28J60_MISTAT, &mii_status) ==
                 NRC_SUCCESS,
               "read MISTAT failed",
@@ -927,9 +927,6 @@ enc28j60_verify_id(emac_enc28j60_t* emac)
             "read EREVID failed",
             out,
             NRC_FAIL);
-
-  nrc_usr_print("[%s] compiled %s %s\n", __func__, __DATE__, __TIME__);
-  nrc_usr_print("[%s] ENC28J60_REV_B1 0x%X <= ENC28J60_EREVID 0x%X <= 0x%X ENC28J60_REV_B7\n", __func__, ENC28J60_REV_B1, emac->revision, ENC28J60_REV_B7);
   
   MAC_CHECK(emac->revision >= ENC28J60_REV_B1 &&
               emac->revision <= ENC28J60_REV_B7,
@@ -1214,7 +1211,6 @@ enc28j60_isr_handler(int vector)
   int input_high = 0;
   
   if (nrc_gpio_inputb(gemac->int_gpio_num, &input_high) != NRC_SUCCESS || input_high == 1) {
-    // nrc_usr_print("[%s] called but failed, input_high %d\n", __func__, input_high);
     return;
   }
 
@@ -1244,6 +1240,8 @@ emac_enc28j60_task(void* arg)
   uint8_t* buffer = NULL;
   uint32_t length = 0;
   int int_bit = 0;
+  int retries = 0;
+  int max_retries = 10;
 
   while (1) {
   loop_start:
@@ -1304,7 +1302,7 @@ emac_enc28j60_task(void* arg)
             length = ETH_MAX_PACKET_SIZE;
             buffer = nrc_mem_malloc(length);
             if (!buffer) {
-               nrc_usr_print("[%s] buffer allocation failed, waiting 1 ms to recover...\n", __func__);
+               E(TT_NET, "[%s] buffer allocation failed, waiting 1 ms to recover...\n", __func__);
                 _delay_ms(1);
             }
         } while (!buffer);
@@ -1355,10 +1353,12 @@ emac_enc28j60_task(void* arg)
             "clear TXIF failed",
             loop_end);
           // Enable global interrupt flag and try to retransmit
+
           MAC_CHECK_NO_RET(
             enc28j60_do_bitwise_set(emac, ENC28J60_EIE, EIE_INTIE) == NRC_SUCCESS,
             "set INTIE failed",
-            loop_end);
+            loop_end );
+
           MAC_CHECK_NO_RET(enc28j60_do_bitwise_set(
                              emac, ENC28J60_ECON1, ECON1_TXRTS) == NRC_SUCCESS,
                            "set TXRTS failed",
@@ -1575,6 +1575,7 @@ emac_enc28j60_receive(esp_eth_mac_t* mac, uint8_t* buf, uint32_t* length)
     V(TT_NET, "[%s] rx_len = %d.\n", __func__, rx_len);
     if ((rx_len <= 0) || (rx_len > ETH_MAX_PACKET_SIZE)) {
         E(TT_NET, "[%s] Error invalid receive length %d\n", __func__, rx_len);
+        enc28j60_do_reset(emac);
 		ret = NRC_FAIL;
 		goto out;
     }
@@ -1621,7 +1622,7 @@ ATTR_NC __attribute__((optimize("O3"))) static nrc_err_t init_dynamic_buffers(vo
 
   do {
     if (retry_cnt > MAX_RETRY_COUNT) {
-      nrc_usr_print("[%s] failed to allocate size %d\n", __func__, SPI_TRANSFER_BUF_LEN);
+      E(TT_NET, "[%s] failed to allocate size %d\n", __func__, SPI_TRANSFER_BUF_LEN);
       return NRC_FAIL;
     }
     spi_transfer_buf = nrc_mem_malloc(SPI_TRANSFER_BUF_LEN);
@@ -1680,7 +1681,7 @@ emac_enc28j60_init(esp_eth_mac_t* mac)
 
 #ifdef ENABLE_ETHERNET_INTERRUPT
   if (nrc_gpio_register_interrupt_handler(INT_VECTOR0, emac->int_gpio_num, enc28j60_isr_handler) == NRC_SUCCESS) {
-    nrc_usr_print("[%s] interrupt handler installed\n", __func__);
+    E(TT_NET, "[%s] interrupt handler installed\n", __func__);
   }
 #endif
 

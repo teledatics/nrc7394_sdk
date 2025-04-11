@@ -81,6 +81,7 @@
 
 
 #include "lwip/opt.h"
+#include "lwip/etharp.h"
 
 #if LWIP_BRIDGE
 #include "netif/bridgeif.h"
@@ -252,6 +253,8 @@ bridgeif_is_local_mac(bridgeif_private_t *br, struct eth_addr *addr)
 static err_t
 bridgeif_send_to_port(bridgeif_private_t *br, struct pbuf *p, u8_t dstport_idx)
 {
+  struct eth_hdr *ethhdr = (struct eth_hdr*)p->payload;
+  
   if (dstport_idx < BRIDGEIF_MAX_PORTS) {
     /* possibly an external port */
     if (dstport_idx < br->max_ports) {
@@ -323,6 +326,16 @@ bridgeif_output(struct netif *netif, struct pbuf *p)
   return err;
 }
 
+static bridgeif_portmask_t bridgeif_find_portmask_from_netif(bridgeif_private_t *br, struct netif *target_netif) 
+{
+  for (u8_t i = 0; i < BRIDGEIF_MAX_PORTS; i++) {
+    if (br->ports[i].port_netif == target_netif) {
+      return (bridgeif_portmask_t)(1 << i);
+    }
+  }
+  return 0; // explicitly indicate netif not found
+}
+
 /** The actual bridge input function. Port netif's input is changed to call
  * here. This function decides where the frame is forwarded.
  */
@@ -375,15 +388,59 @@ bridgeif_input(struct pbuf *p, struct netif *netif)
     /* is this for one of the local ports? */
     if (bridgeif_is_local_mac(br, dst)) {
       /* yes, send to cpu port only */
-      LWIP_DEBUGF(BRIDGEIF_FW_DEBUG, ("br -> input(%p)\n", (void *)p));
+      LWIP_DEBUGF(BRIDGEIF_FW_DEBUG, ("local port br -> input(%p)\n", (void *)p));
       return br->netif->input(p, br->netif);
     }
 
     /* get dst port */
     dstports = bridgeif_find_dst_ports(br, dst);
-    bridgeif_send_to_ports(br, p, dstports);
-    /* no need to send to cpu, flooding is for external ports only */
-    /* by  this, we consumed the pbuf */
+
+#ifdef LWIP_PROXYARP
+    if ((dstports == 0 || dstports == BR_FLOOD) && 
+        (br->netif->flags & NETIF_FLAG_PROXYARP)) {
+
+      /* Proxy ARP handling when MAC entry isn't found */
+      struct eth_hdr *ethhdr = (struct eth_hdr *)p->payload;
+      ip4_addr_t dest_ip;
+
+      LWIP_DEBUGF(PROXYARP_DEBUG, ("[%s][Proxy ARP] lookup packet dest\n", __func__));
+    
+      if (htons(ethhdr->type) == ETHTYPE_IP) {
+        struct ip_hdr *iph = (struct ip_hdr *)((u8_t*)p->payload + SIZEOF_ETH_HDR);
+        // IPADDR_WORDALIGNED_COPY_TO_IP4_ADDR_T(&dest_ip, &iph->dest);
+        dest_ip.addr = ip4_addr_get_u32(&iph->dest);
+      }
+      else if (htons(ethhdr->type) == ETHTYPE_ARP) {
+        struct etharp_hdr *arp_hdr = (struct etharp_hdr *)((u8_t*)p->payload + SIZEOF_ETH_HDR);
+        dest_ip.addr = (arp_hdr->dipaddr.addrw[1] << 16) | arp_hdr->dipaddr.addrw[0];
+      }
+
+      proxy_arp_entry_t *entry = proxy_arp_lookup(&dest_ip, NULL);
+
+      LWIP_DEBUGF(PROXYARP_DEBUG, ("[Proxy ARP] Looked up entry %c%c valid %d for %u.%u.%u.%u\n", entry->netif->name[0], entry->netif->name[1], entry->valid,
+                   ip4_addr1(&dest_ip), ip4_addr2(&dest_ip), ip4_addr3(&dest_ip), ip4_addr4(&dest_ip)));
+      
+      if (entry && entry->valid && entry->netif) {
+          dstports = bridgeif_find_portmask_from_netif(br, entry->netif);
+          LWIP_DEBUGF(PROXYARP_DEBUG, ("[Proxy ARP] Forwarding packet to interface via Proxy ARP: %u.%u.%u.%u\n",
+                   ip4_addr1(&dest_ip), ip4_addr2(&dest_ip), ip4_addr3(&dest_ip), ip4_addr4(&dest_ip)));
+      } else {
+          LWIP_DEBUGF(PROXYARP_DEBUG, ("[Proxy ARP] No entry found for %u.%u.%u.%u\n",
+                   ip4_addr1(&dest_ip), ip4_addr2(&dest_ip), ip4_addr3(&dest_ip), ip4_addr4(&dest_ip)));
+      }
+    }
+#endif /* LWIP_PROXYARP */
+    if (dstports) {
+      bridgeif_send_to_ports(br, p, dstports);
+    } else {
+#ifdef LWIP_PROXYARP
+      LWIP_DEBUGF(PROXYARP_DEBUG, ("[Proxy ARP] No entry explicitly found, flooding\n"));
+#endif
+      /* fallback to flooding explicitly */
+      bridgeif_send_to_ports(br, p, BR_FLOOD);
+    }
+    
+    /* consume the pbuf explicitly */
     pbuf_free(p);
     /* always return ERR_OK here to prevent the caller freeing the pbuf */
     return ERR_OK;
@@ -504,6 +561,10 @@ bridgeif_init(struct netif *netif)
   /* don't set NETIF_FLAG_ETHARP if this device is not an ethernet one */
   netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_ETHERNET | NETIF_FLAG_IGMP | NETIF_FLAG_MLD6 | NETIF_FLAG_LINK_UP;
 
+#if LWIP_PROXYARP
+  netif->flags |= NETIF_FLAG_PROXYARP;
+#endif /* LWIP_PROXYARP */
+        
 #if LWIP_IPV6 && LWIP_IPV6_MLD
   /*
    * For hardware/netifs that implement MAC filtering.
@@ -562,6 +623,33 @@ bridgeif_add_port(struct netif *bridgeif, struct netif *portif)
   netif_clear_flags(portif, NETIF_FLAG_ETHARP);
 
   return ERR_OK;
+}
+
+char* bridge_print_info(struct netif *bridgeif)
+{
+  static char br_str[100];
+  char tmp[20];
+  bridgeif_private_t *br;
+  bridgeif_port_t *port;
+  int i;
+
+  memset(br_str, 0, sizeof(br_str));
+
+  if(!bridgeif)
+    return br_str;
+
+  br = (bridgeif_private_t *)bridgeif->state;
+  snprintf(br_str, sizeof(br_str)-1, "bridge %c%c intfs %d", bridgeif->name[0], bridgeif->name[1], br->num_ports);
+  for(i=0;i<br->num_ports;i++)
+  {
+    port = &br->ports[i];
+    
+    snprintf(tmp, sizeof(tmp)-1, "\n\tint[%d] %c%c", i, port->port_netif->name[0], port->port_netif->name[1]);
+    strcat(br_str, tmp);
+  }
+  strcat(br_str, "\n");
+
+  return br_str;
 }
 
 #endif /* LWIP_NUM_NETIF_CLIENT_DATA */

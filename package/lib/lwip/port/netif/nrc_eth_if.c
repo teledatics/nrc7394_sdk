@@ -198,7 +198,7 @@ static void nrc_bind_eth_if(esp_eth_mac_t *mac)
 
     /* set MAC hardware address to be used by lwIP */
     mac->get_addr(mac, eth_netif.hwaddr);
-    netif_add(&eth_netif, &ipaddr, &netmask, &gw, NULL, eth_init, tcpip_input);
+    netif_add(&eth_netif, &ipaddr, &netmask, &gw, NULL, eth_init, ethernet_input);
     netif_set_status_callback(&eth_netif, status_callback);
     netif_set_link_callback(&eth_netif, link_callback);
 
@@ -224,12 +224,13 @@ static void nrc_bind_eth_if(esp_eth_mac_t *mac)
 		bridge_data.max_fdb_dynamic_entries = 128;
 		bridge_data.max_fdb_static_entries = 16;
 
-		netif_add(&br_netif, &ipaddr, &netmask, &gw, &bridge_data, bridgeif_init, tcpip_input);
+		netif_add(&br_netif, &ipaddr, &netmask, &gw, &bridge_data, bridgeif_init, ethernet_input);
 		bridgeif_add_port(&br_netif, &eth_netif);
 
 		bridgeif_fdb_add(&br_netif, &ethbroadcast, BR_FLOOD);
 		netif_set_default(&br_netif);
 		netif_set_up(&br_netif);
+		set_peer_mac(eth_netif.hwaddr);
 	} else
 #endif /* LWIP_BRIDGE */
 	{
@@ -279,6 +280,29 @@ ATTR_NC __attribute__((optimize("O3"))) static nrc_err_t eth_stack_input_handler
 	switch (htons(ethhdr->type)) {
 		/* IP or ARP packet? */
 		case ETHTYPE_ARP:
+#if defined(SUPPORT_ETHERNET_ACCESSPOINT)
+		// add Ethernet peer mac adress for ARP spoofing
+		if (network_mode == NRC_NETWORK_MODE_BRIDGE) {
+			if(eth_mode != NRC_ETH_MODE_AP && 
+			   ((get_peer_mac()->addr[0] == 0 && get_peer_mac()->addr[1] == 0) ||
+			    !memcmp(ethhdr->src.addr, eth_netif.hwaddr, ETH_HWADDR_LEN) ||
+			    !memcmp(ethhdr->src.addr, nrc_netif[0]->hwaddr, ETH_HWADDR_LEN))) {
+				nrc_usr_print("[%s] setting peer_mac to ("MACSTR")\n", __func__, MAC2STR(ethhdr->src.addr));
+					set_peer_mac(ethhdr->src.addr);
+			}
+		}
+#endif
+#ifdef LWIP_PROXYARP
+		if (htons(ethhdr->type) == ETHTYPE_ARP) {
+			struct etharp_hdr *arp_hdr = (struct etharp_hdr *)(p->payload + SIZEOF_ETH_HDR);
+			ip4_addr_t arp_src_ip;
+
+			arp_src_ip.addr = ((u32_t)(lwip_ntohs(arp_hdr->sipaddr.addrw[0])) << 16) |
+					   (u32_t)(lwip_ntohs(arp_hdr->sipaddr.addrw[1]));
+
+			proxy_arp_learn(&arp_src_ip, (struct eth_addr*)arp_hdr->shwaddr.addr, &eth_netif);
+		}
+#endif /* LWIP_PROXYARP */
 #if PPPOE_SUPPORT
 		/* PPPoE packet? */
 		case ETHTYPE_PPPOEDISC:

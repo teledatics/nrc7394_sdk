@@ -31,6 +31,7 @@ extern struct netif eth_netif;
 #endif /* SUPPORT_ETHERNET_ACCESSPOINT */
 #if LWIP_BRIDGE
 #include "netif/bridgeif.h"
+char* bridge_print_info(struct netif *bridgeif);
 struct netif br_netif;
 bridgeif_initdata_t bridge_data;
 #endif /* LWIP_BRIDGE */
@@ -1083,6 +1084,11 @@ bool wifi_bridge(int argc, char *argv[])
 		}
 		return true;
 	}
+	else if (strcmp(argv[0], "show") == 0) {
+		char *str = bridge_print_info(&br_netif);
+		nrc_usr_print("%s", str);
+		return true;
+ 	}
 	else {
 		bridge_help_display();
 		return false;

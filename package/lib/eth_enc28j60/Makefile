@@ -2,7 +2,7 @@ include $(CONFIG)
 
 PKG_NAME=enc28j60
 
-include eth_w5500.make
+include eth_enj28j60.make
 
 ETH_ENC28J60_BASE	= $(CURDIR)
 

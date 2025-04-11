@@ -36,6 +36,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h> /* abort */
+#include "nrc_sdk.h"
 
 /* Types based on stdint.h */
 typedef uint8_t            u8_t;
@@ -47,8 +48,13 @@ typedef int32_t            s32_t;
 typedef uintptr_t          mem_ptr_t;
 
 /* Plaform specific diagnostic output */
-#define LWIP_PLATFORM_DIAG( x, ... ) do{ system_printf x; } while( 0 );
-#define LWIP_PLATFORM_ASSERT(x) do {system_printf("Assertion \"%s\" failed at line %d in %s\n", \
+/* #define LWIP_PLATFORM_DIAG( x, ... ) do{ system_printf x; } while( 0 );
+ #define LWIP_PLATFORM_ASSERT(x) do {system_printf("Assertion \"%s\" failed at line %d in %s\n", \
+                                      x, __LINE__, __FILE__);    vPortEnterCritical(  );    for( ;; );} while(0)
+*/
+
+#define LWIP_PLATFORM_DIAG( x, ... ) do{ nrc_usr_print x; } while( 0 );
+#define LWIP_PLATFORM_ASSERT(x) do {nrc_usr_print("Assertion \"%s\" failed at line %d in %s\n", \
                                      x, __LINE__, __FILE__);    vPortEnterCritical(  );    for( ;; );} while(0)
 
 /* Define (sn)printf formatters for these lwIP types */
