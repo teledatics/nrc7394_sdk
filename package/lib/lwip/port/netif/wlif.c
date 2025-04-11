@@ -307,8 +307,8 @@ void lwif_input(struct nrc_wpa_if* intf, void *buffer, int data_len)
 				struct etharp_hdr *arp_hdr = (struct etharp_hdr *)(p->payload + SIZEOF_ETH_HDR);
 				ip4_addr_t arp_src_ip;
 
-				arp_src_ip.addr = ((u32_t)(lwip_ntohs(arp_hdr->sipaddr.addrw[0])) << 16) |
-						   (u32_t)(lwip_ntohs(arp_hdr->sipaddr.addrw[1]));
+				arp_src_ip.addr = ((u32_t)(lwip_ntohs(arp_hdr->sipaddr.addrw[1])) << 16) |
+						   (u32_t)(lwip_ntohs(arp_hdr->sipaddr.addrw[0]));
 
 				proxy_arp_learn(&arp_src_ip, (struct eth_addr*)arp_hdr->shwaddr.addr, netif);
 			}

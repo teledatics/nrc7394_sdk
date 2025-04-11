@@ -301,7 +301,7 @@ ATTR_NC __attribute__((optimize("O3"))) static nrc_err_t eth_stack_input_handler
 #endif
 #ifdef LWIP_PROXYARP
 		if (htons(ethhdr->type) == ETHTYPE_ARP) {
-			struct etharp_hdr *arp_hdr = (struct etharp_hdr *)(p->payload + SIZEOF_ETH_HDR);
+			struct etharp_hdr *arp_hdr = (struct etharp_hdr *)(buffer + SIZEOF_ETH_HDR);
 			ip4_addr_t arp_src_ip;
 
 			arp_src_ip.addr = ((u32_t)(lwip_ntohs(arp_hdr->sipaddr.addrw[0])) << 16) |
