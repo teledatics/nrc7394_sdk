@@ -128,10 +128,15 @@ void bridgeif_fdb_update_src(void *fdb_ptr, struct eth_addr *src_addr, u8_t port
                         return;
                     }
                 }
+                else {
+                  if(e->roam_count > 0)
+                    e->roam_count--;
+                }
 
                 // Always update port and timestamp
                 e->port = port_idx;
                 e->ts = BR_FDB_TIMEOUT_SEC;
+                e->lock_until = 0;
 
                 BRIDGEIF_WRITE_UNPROTECT(lev);
                 BRIDGEIF_READ_UNPROTECT(lev);
