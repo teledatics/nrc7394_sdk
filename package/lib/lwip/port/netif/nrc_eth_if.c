@@ -208,12 +208,13 @@ static void nrc_bind_eth_if(esp_eth_mac_t *mac)
     netif_add(&eth_netif, &ipaddr, &netmask, &gw, NULL, eth_init, ethernet_input);
     netif_set_status_callback(&eth_netif, status_callback);
     netif_set_link_callback(&eth_netif, link_callback);
-
-	netif_set_flags(&eth_netif, NETIF_FLAG_ETHARP | NETIF_FLAG_ETHERNET);
+    netif_set_flags(&eth_netif, NETIF_FLAG_ETHARP | NETIF_FLAG_ETHERNET);
+    
     /* bring it up */
     netif_set_up(&eth_netif);
-	/* start with link down */
-	netif_set_link_down(&eth_netif);
+    
+    /* start with link down */
+    netif_set_link_down(&eth_netif);
 
 #if LWIP_BRIDGE
 	if (network_mode == NRC_NETWORK_MODE_BRIDGE) {
@@ -227,10 +228,11 @@ static void nrc_bind_eth_if(esp_eth_mac_t *mac)
 #else
 		memcpy(bridge_data.ethaddr.addr, nrc_netif[0]->hwaddr, 6);
 #endif
-		bridge_data.max_ports = 2;
+		bridge_data.max_ports = 3;
 		bridge_data.max_fdb_dynamic_entries = 128;
 		bridge_data.max_fdb_static_entries = 16;
 
+		// NOTE: wifi_connect_common.c -> wifi_event_handler() adds STA interface to the bridge when it connects with an AP...
 		netif_add(&br_netif, &ipaddr, &netmask, &gw, &bridge_data, bridgeif_init, ethernet_input);
 		bridgeif_add_port(&br_netif, &eth_netif);
 
@@ -273,6 +275,7 @@ ATTR_NC __attribute__((optimize("O3"))) static nrc_err_t eth_stack_input_handler
 {
 	struct pbuf *p = NULL;
 	struct eth_hdr *ethhdr = (struct eth_hdr *) buffer;
+	struct etharp_hdr *arp_hdr;
 
 	V(TT_NET, "[%s] buffer of size %d received...\n", __func__, length);
 //	print_buffer(buffer, length);
@@ -288,27 +291,27 @@ ATTR_NC __attribute__((optimize("O3"))) static nrc_err_t eth_stack_input_handler
 		/* IP or ARP packet? */
 		case ETHTYPE_ARP:
 #if defined(SUPPORT_ETHERNET_ACCESSPOINT)
-		// add Ethernet peer mac adress for ARP spoofing
-		if (network_mode == NRC_NETWORK_MODE_BRIDGE) {
-			if(eth_mode != NRC_ETH_MODE_AP && 
-			   ((get_peer_mac()->addr[0] == 0 && get_peer_mac()->addr[1] == 0) ||
-			    !memcmp(ethhdr->src.addr, eth_netif.hwaddr, ETH_HWADDR_LEN) ||
-			    !memcmp(ethhdr->src.addr, nrc_netif[0]->hwaddr, ETH_HWADDR_LEN))) {
-				nrc_usr_print("[%s] setting peer_mac to ("MACSTR")\n", __func__, MAC2STR(ethhdr->src.addr));
+			// add Ethernet peer mac adress for ARP spoofing
+			if (network_mode == NRC_NETWORK_MODE_BRIDGE) {
+				if(eth_mode != NRC_ETH_MODE_AP && 
+				  ((get_peer_mac()->addr[0] == 0 && get_peer_mac()->addr[1] == 0) ||
+				    !memcmp(ethhdr->src.addr, eth_netif.hwaddr, ETH_HWADDR_LEN) ||
+				    !memcmp(ethhdr->src.addr, nrc_netif[0]->hwaddr, ETH_HWADDR_LEN))) {
+					nrc_usr_print("[%s] setting peer_mac to ("MACSTR")\n", __func__, MAC2STR(ethhdr->src.addr));
 					set_peer_mac(ethhdr->src.addr);
+				}
 			}
-		}
 #endif
 #ifdef LWIP_PROXYARP
-		if (htons(ethhdr->type) == ETHTYPE_ARP) {
-			struct etharp_hdr *arp_hdr = (struct etharp_hdr *)(buffer + SIZEOF_ETH_HDR);
-			ip4_addr_t arp_src_ip;
+			arp_hdr = (struct etharp_hdr *)(buffer + SIZEOF_ETH_HDR);
+			if (htons(ethhdr->type) == ETHTYPE_ARP && htons(arp_hdr->opcode) == ARP_REPLY) {
+				struct etharp_hdr *arp_hdr = (struct etharp_hdr *)(buffer + SIZEOF_ETH_HDR);
+				ip4_addr_t arp_src_ip;
 
-			arp_src_ip.addr = ((u32_t)(lwip_ntohs(arp_hdr->sipaddr.addrw[0])) << 16) |
-					   (u32_t)(lwip_ntohs(arp_hdr->sipaddr.addrw[1]));
+				arp_src_ip.addr = ((u32_t)(arp_hdr->sipaddr.addrw[1]) << 16) | (u32_t)(arp_hdr->sipaddr.addrw[0]);
 
-			proxy_arp_learn(&arp_src_ip, (struct eth_addr*)arp_hdr->shwaddr.addr, &eth_netif);
-		}
+				proxy_arp_learn(&arp_src_ip, (struct eth_addr*)arp_hdr->shwaddr.addr, &eth_netif);
+			}
 #endif /* LWIP_PROXYARP */
 #if PPPOE_SUPPORT
 		/* PPPoE packet? */

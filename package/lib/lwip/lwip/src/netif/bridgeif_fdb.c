@@ -44,20 +44,31 @@
 #include "lwip/opt.h"
 
 #if LWIP_BRIDGE
+
 #include "netif/bridgeif.h"
 #include "lwip/sys.h"
 #include "lwip/mem.h"
 #include "lwip/timeouts.h"
 #include <string.h>
 
+
+#define BR_FDB_TIMEOUT_SEC  (60*5)           /* 5 minutes FDB timeout */
 #define BRIDGEIF_AGE_TIMER_MS 1000
 
-#define BR_FDB_TIMEOUT_SEC  (60*5) /* 5 minutes FDB timeout */
+#ifdef LWIP_BRIDGE_ROAMING
+#define BRIDGEIF_FDB_ROAM_THRESHOLD     3    /* Max allowed roams before lock */
+#define BRIDGEIF_FDB_LOCK_DURATION_SEC  30   /* Lock duration in seconds */
+#endif /* LWIP_BRIDGE_ROAMING */
+
 
 typedef struct bridgeif_dfdb_entry_s {
   u8_t used;
   u8_t port;
   u32_t ts;
+#ifdef LWIP_BRIDGE_ROAMING
+  u8_t roam_count;
+  u32_t lock_until;
+#endif
   struct eth_addr addr;
 } bridgeif_dfdb_entry_t;
 
@@ -65,6 +76,91 @@ typedef struct bridgeif_dfdb_s {
   u16_t max_fdb_entries;
   bridgeif_dfdb_entry_t *fdb;
 } bridgeif_dfdb_t;
+
+#ifdef LWIP_BRIDGE_ROAMING
+
+/**
+ * @ingroup bridgeif_fdb
+ * 
+ * Implementation of bridge port ageing with locking. This is designed to prevent port
+ * echo causing improper changes of MAC to port mappings.
+ */
+void bridgeif_fdb_update_src(void *fdb_ptr, struct eth_addr *src_addr, u8_t port_idx)
+{
+    bridgeif_dfdb_t *fdb = (bridgeif_dfdb_t *)fdb_ptr;
+    u32_t now = sys_now() / 1000; // time in seconds
+    int i, free_idx = -1;
+
+    BRIDGEIF_DECL_PROTECT(lev);
+    BRIDGEIF_READ_PROTECT(lev);
+
+    for (i = 0; i < fdb->max_fdb_entries; i++) {
+        bridgeif_dfdb_entry_t *e = &fdb->fdb[i];
+
+        if (e->used && e->ts) {
+            if (!memcmp(&e->addr, src_addr, sizeof(struct eth_addr))) {
+                BRIDGEIF_WRITE_PROTECT(lev);
+
+                // Check if the entry is currently locked
+                if (now < e->lock_until) {
+                    // explicitly ignore updates during lock
+                    if (e->port != port_idx) {
+                        LWIP_DEBUGF(BRIDGEIF_FDB_DEBUG, ("br: ignoring update for locked %02x:%02x:%02x:%02x:%02x:%02x (from %d) @ idx %d\n",
+                                         src_addr->addr[0], src_addr->addr[1], src_addr->addr[2], src_addr->addr[3], src_addr->addr[4], src_addr->addr[5],
+                                         port_idx, i));
+                        BRIDGEIF_WRITE_UNPROTECT(lev);
+                        BRIDGEIF_READ_UNPROTECT(lev);
+                        return;
+                    }
+                }
+
+                // Entry is not locked, handle potential roam
+                if (e->port != port_idx) {
+                    e->roam_count++;
+                    if (e->roam_count >= BRIDGEIF_FDB_ROAM_THRESHOLD) {
+                        // Exceeded roam threshold, lock the MAC entry
+                        e->lock_until = now + BRIDGEIF_FDB_LOCK_DURATION_SEC;
+                        LWIP_DEBUGF(BRIDGEIF_FDB_DEBUG, ("br: roam threshhold exceeded, locking %02x:%02x:%02x:%02x:%02x:%02x (from %d) @ idx %d\n",
+                                         src_addr->addr[0], src_addr->addr[1], src_addr->addr[2], src_addr->addr[3], src_addr->addr[4], src_addr->addr[5],
+                                         port_idx, i));
+                        BRIDGEIF_WRITE_UNPROTECT(lev);
+                        BRIDGEIF_READ_UNPROTECT(lev);
+                        return;
+                    }
+                }
+
+                // Always update port and timestamp
+                e->port = port_idx;
+                e->ts = BR_FDB_TIMEOUT_SEC;
+
+                BRIDGEIF_WRITE_UNPROTECT(lev);
+                BRIDGEIF_READ_UNPROTECT(lev);
+                return;
+            }
+        } else if (free_idx == -1) {
+            free_idx = i; // find first available slot for new entry
+        }
+    }
+
+    // MAC address not found, use free entry
+    if (free_idx != -1) {
+        BRIDGEIF_WRITE_PROTECT(lev);
+
+        bridgeif_dfdb_entry_t *e = &fdb->fdb[free_idx];
+        e->used = 1;
+        memcpy(&e->addr, src_addr, sizeof(struct eth_addr));
+        e->port = port_idx;
+        e->ts = BR_FDB_TIMEOUT_SEC;
+        e->roam_count = 0; // new MAC address, roam count starts at 0
+        e->lock_until = 0; // not locked initially
+
+        BRIDGEIF_WRITE_UNPROTECT(lev);
+    }
+
+    BRIDGEIF_READ_UNPROTECT(lev);
+}
+
+#else /* !LWIP_BRIDGE_ROAMING */
 
 /**
  * @ingroup bridgeif_fdb
@@ -90,10 +186,12 @@ bridgeif_fdb_update_src(void *fdb_ptr, struct eth_addr *src_addr, u8_t port_idx)
                                          src_addr->addr[0], src_addr->addr[1], src_addr->addr[2], src_addr->addr[3], src_addr->addr[4], src_addr->addr[5],
                                          port_idx, i));
         BRIDGEIF_WRITE_PROTECT(lev);
-#ifndef LWIP_PROXYARP
         e->ts = BR_FDB_TIMEOUT_SEC;
-        e->port = port_idx;
+#ifdef LWIP_BRIDGE_BOUNCE_FIX
+        if(e->port == port_idx)
 #endif
+        e->port = port_idx;
+
         BRIDGEIF_WRITE_UNPROTECT(lev);
         BRIDGEIF_READ_UNPROTECT(lev);
         return;
@@ -124,6 +222,7 @@ bridgeif_fdb_update_src(void *fdb_ptr, struct eth_addr *src_addr, u8_t port_idx)
   BRIDGEIF_READ_UNPROTECT(lev);
   /* not found, no free entry -> flood */
 }
+#endif /* LWIP_BRIDGE_ROAMING */
 
 /** 
  * @ingroup bridgeif_fdb
@@ -148,6 +247,31 @@ bridgeif_fdb_get_dst_ports(void *fdb_ptr, struct eth_addr *dst_addr)
   }
   BRIDGEIF_READ_UNPROTECT(lev);
   return BR_FLOOD;
+}
+
+/** 
+ * @ingroup bridgeif_fdb
+ * Walk our list of fdb entries for a given port and remove them
+ */
+void bridgeif_fdb_remove_by_port(void *fdb_ptr, u8_t port_num)
+{
+    bridgeif_dfdb_t *fdb = (bridgeif_dfdb_t *)fdb_ptr;
+    BRIDGEIF_DECL_PROTECT(lev);
+    BRIDGEIF_WRITE_PROTECT(lev);
+
+    for (int i = 0; i < fdb->max_fdb_entries; i++) {
+        if (fdb->fdb[i].used && fdb->fdb[i].port == port_num) {
+            fdb->fdb[i].used = 0;
+            memset(&fdb->fdb[i].addr, 0, sizeof(struct eth_addr));
+            fdb->fdb[i].ts = 0;
+            fdb->fdb[i].port = 0;
+        } else if (fdb->fdb[i].used && fdb->fdb[i].port > port_num) {
+            /* Adjust port numbers to reflect shifted indices after removal */
+            fdb->fdb[i].port--;
+        }
+    }
+
+    BRIDGEIF_WRITE_UNPROTECT(lev);
 }
 
 /**
@@ -189,6 +313,7 @@ bridgeif_age_tmr(void *arg)
   LWIP_ASSERT("invalid arg", arg != NULL);
 
   bridgeif_fdb_age_one_second(fdb);
+
   sys_timeout(BRIDGEIF_AGE_TIMER_MS, bridgeif_age_tmr, arg);
 }
 

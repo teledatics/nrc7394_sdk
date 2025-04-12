@@ -91,6 +91,7 @@
 #include "lwip/ethip6.h"
 #include "lwip/snmp.h"
 #include "lwip/timeouts.h"
+#include "lwip/tcpip.h"
 #include <string.h>
 
 #if LWIP_NUM_NETIF_CLIENT_DATA
@@ -623,6 +624,51 @@ bridgeif_add_port(struct netif *bridgeif, struct netif *portif)
   netif_clear_flags(portif, NETIF_FLAG_ETHARP);
 
   return ERR_OK;
+}
+
+/**
+ * @ingroup bridgeif
+ * Remove a port from the bridge
+ */
+err_t bridgeif_remove_port(struct netif *bridgeif, struct netif *portif)
+{
+  bridgeif_private_t *br;
+  int i, j;
+
+  LWIP_ASSERT("bridgeif != NULL", bridgeif != NULL);
+  LWIP_ASSERT("bridgeif->state != NULL", bridgeif->state != NULL);
+  LWIP_ASSERT("portif != NULL", portif != NULL);
+
+  br = (bridgeif_private_t *)bridgeif->state;
+
+  for (i = 0; i < br->num_ports; i++) {
+    if (br->ports[i].port_netif == portif) {
+      
+      /* Restore the original input function if necessary */
+      portif->input = tcpip_input;
+
+      /* Restore original flags */
+      netif_set_flags(portif, NETIF_FLAG_ETHARP);
+
+      /* Clear client data reference */
+      netif_set_client_data(portif, bridgeif_netif_client_id, NULL);
+
+      /* Shift remaining ports to keep the array contiguous */
+      for (j = i; j < br->num_ports - 1; j++) {
+        br->ports[j] = br->ports[j + 1];
+        br->ports[j].port_num = j;  /* update port numbers */
+      }
+
+      br->num_ports--;
+
+      /* Remove associated dynamic entries from FDB */
+      bridgeif_fdb_remove_by_port(br->fdbd, i);
+
+      return ERR_OK;
+    }
+  }
+
+  return ERR_VAL; /* Port not found */
 }
 
 char* bridge_print_info(struct netif *bridgeif)

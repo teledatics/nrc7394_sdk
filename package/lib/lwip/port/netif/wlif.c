@@ -266,17 +266,26 @@ void lwif_input(struct nrc_wpa_if* intf, void *buffer, int data_len)
 	switch (htons(ethhdr->type)) {
 		/* IP or ARP packet? */
 		case ETHTYPE_ARP:
+			arp_hdr = (struct etharp_hdr *)(p->payload + SIZEOF_ETH_HDR);
+#ifdef LWIP_PROXYARP
+			if (htons(ethhdr->type) == ETHTYPE_ARP && htons(arp_hdr->opcode) == ARP_REPLY) {
+				ip4_addr_t arp_src_ip;
+
+				arp_src_ip.addr = ((u32_t)(arp_hdr->sipaddr.addrw[1]) << 16) | (u32_t)(arp_hdr->sipaddr.addrw[0]);
+
+				proxy_arp_learn(&arp_src_ip, (struct eth_addr*)arp_hdr->shwaddr.addr, netif);
+			}
+#endif /* LWIP_PROXYARP */
 #if defined(SUPPORT_ETHERNET_ACCESSPOINT)
 			if (!nrc_get_use_4address() &&
 			    (nrc_eth_get_network_mode() == NRC_NETWORK_MODE_BRIDGE)) {
-				arp_hdr = (struct etharp_hdr *)(p->payload + SIZEOF_ETH_HDR);
-				V(TT_NET, "[ARP][%s] ", htons(arp_hdr->opcode) == 1 ? "REQ" : "REP");
+				V(TT_NET, "[ARP][%s] ", htons(arp_hdr->opcode) == ARP_REQUEST ? "REQ" : "REP");
 				V(TT_NET, "dst("MACSTR"), src("MACSTR")\n", MAC2STR(ethhdr->dest.addr), MAC2STR(ethhdr->src.addr));
 				#if LWIP_BRIDGE
 				u32 target_ip_addr = (arp_hdr->dipaddr.addrw[1] << 16) | arp_hdr->dipaddr.addrw[0];
 				#endif /* LWIP_BRIDGE */
 				if (!intf->is_ap) { // br0 mac == wlan0 mac
-					if (htons(arp_hdr->opcode) == 1) { // ARP Request
+					if (htons(arp_hdr->opcode) == ARP_REQUEST) {
 						if (!os_memcmp(arp_hdr->shwaddr.addr, netif->hwaddr, 6)) {
 							goto pbuf_free;
 						} else {
@@ -302,17 +311,6 @@ void lwif_input(struct nrc_wpa_if* intf, void *buffer, int data_len)
 				goto next;
 			}
 #endif
-#ifdef LWIP_PROXYARP
-			if (htons(ethhdr->type) == ETHTYPE_ARP) {
-				struct etharp_hdr *arp_hdr = (struct etharp_hdr *)(p->payload + SIZEOF_ETH_HDR);
-				ip4_addr_t arp_src_ip;
-
-				arp_src_ip.addr = ((u32_t)(lwip_ntohs(arp_hdr->sipaddr.addrw[1])) << 16) |
-						   (u32_t)(lwip_ntohs(arp_hdr->sipaddr.addrw[0]));
-
-				proxy_arp_learn(&arp_src_ip, (struct eth_addr*)arp_hdr->shwaddr.addr, netif);
-			}
-#endif /* LWIP_PROXYARP */
 #if PPPOE_SUPPORT
 		/* PPPoE packet? */
 		case ETHTYPE_PPPOEDISC:

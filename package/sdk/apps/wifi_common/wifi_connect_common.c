@@ -131,6 +131,13 @@ static void wifi_event_handler(int vif, tWIFI_EVENT_ID event, int data_len, void
 			reset_ip_address(vif);
 #endif
 			nrc_wifi_stop_dhcp_client(vif);
+#if LWIP_BRIDGE			
+			if (wifi_config->network_mode == WIFI_NETWORK_MODE_BRIDGE) {
+				nrc_usr_print("[%s] Removing nrc_netif[%d] from bridge...\n", __func__, vif);
+				bridgeif_remove_port(&br_netif, nrc_netif[vif]);
+				break;
+			}
+#endif /* LWIP_BRIDGE */
 			break;
 		case WIFI_EVT_SCAN_DONE:
 #if defined(INCLUDE_TRACE_WAKEUP)

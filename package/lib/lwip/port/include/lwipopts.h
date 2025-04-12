@@ -407,8 +407,14 @@ a lot of data that needs to be copied, this should be set high. */
 /* LWIP_BRIDGE==1: Enable bridge interface application */
 #define LWIP_BRIDGE            1
 
-/* LWIP_BRIDGE==1: Enable bridge interface application */
+/* LWIP_PROXYARP==1: Enable proxy ARP on bridge interface */
 #define LWIP_PROXYARP         1
+
+/* LWIP_BRIDGE_BOUNCE_FIX==1: Enable port bouncing fix on bridge interface */
+#define LWIP_BRIDGE_BOUNCE_FIX         1
+
+/* LWIP_BRIDGE_ROAMING==1: Enable port roaming on bridge interface */
+#define LWIP_BRIDGE_ROAMING         0
 
 /* STATIC_ARP_ENTRY_DHCP_SERVER==1: Enable static arp about DHCP server */
 #define STATIC_ARP_ENTRY_DHCP_SERVER            1
