@@ -1482,9 +1482,12 @@ wait_for_transmit_completion(emac_enc28j60_t *emac)
           break;
 
         if (xTaskGetTickCount() >= timeout) {
-            E(TT_NET, "timeout expired, transmission stuck");
-            MAC_CHECK(enc28j60_do_bitwise_clr(emac, ENC28J60_ECON1, ECON1_TXRTS) == NRC_SUCCESS,
-              "set ECON1.TXRTS failed", out, NRC_FAIL);
+            E(TT_NET, "timeout expired, transmission stuck\n");
+            ret = NRC_FAIL;
+            // MAC_CHECK_NO_RET(enc28j60_do_bitwise_set(emac, ENC28J60_ECON1, ECON1_TXRST) == NRC_SUCCESS, "set TXRST failed", out);
+            // MAC_CHECK_NO_RET(enc28j60_do_bitwise_clr(emac, ENC28J60_ECON1, ECON1_TXRST) == NRC_SUCCESS, "clear TXRST failed", out);
+            // MAC_CHECK_NO_RET(enc28j60_do_bitwise_clr(emac, ENC28J60_EIR, EIR_TXERIF) == NRC_SUCCESS, "clear TXERIF failed", out);
+            _delay_ms(10);
             return NRC_FAIL;
         }
 
@@ -1569,29 +1572,19 @@ emac_enc28j60_receive(esp_eth_mac_t* mac, uint8_t* buf, uint32_t* length)
 
     // get packets' length, address
     rx_len = header.length_low + (header.length_high << 8);
+    
     V(TT_NET, "[%s] rx_len = %d.\n", __func__, rx_len);
+    
     if ((rx_len <= 0) || (rx_len > ETH_MAX_PACKET_SIZE)) {
-        E(TT_NET, "[%s] Error invalid receive length %d\n", __func__, rx_len);
-
-        MAC_CHECK_NO_RET(
-          enc28j60_do_bitwise_set(emac, ENC28J60_ECON1, ECON1_RXRST) == NRC_SUCCESS,
-          "set RXRST failed",
-          out);
-
-        MAC_CHECK_NO_RET(
-          enc28j60_do_bitwise_clr(emac, ENC28J60_ECON1, ECON1_RXRST) == NRC_SUCCESS,
-          "clear RXRST failed",
-          out);
-
-        // Clear Rx Error Interrupt Flag
-        MAC_CHECK_NO_RET(
-          enc28j60_do_bitwise_clr(emac, ENC28J60_EIR, EIR_RXERIF) == NRC_SUCCESS,
-          "clear RXERIF failed",
-          out);
-
-        return NRC_FAIL;
-
+      ret = NRC_FAIL;
+      E(TT_NET, "[%s] Error invalid receive length %d\n", __func__, rx_len);
+      // MAC_CHECK_NO_RET(enc28j60_do_bitwise_set(emac, ENC28J60_ECON2, ECON2_PKTDEC) == NRC_SUCCESS, "set ECON2.PKTDEC failed", out);
+      // MAC_CHECK_NO_RET(enc28j60_do_bitwise_set(emac, ENC28J60_ECON1, ECON1_RXRST) == NRC_SUCCESS, "set RXRST failed", out);
+      MAC_CHECK_NO_RET(enc28j60_do_bitwise_clr(emac, ENC28J60_ECON1, ECON1_RXRST) == NRC_SUCCESS, "clear RXRST failed", out);
+      // MAC_CHECK_NO_RET(enc28j60_do_bitwise_clr(emac, ENC28J60_EIR, EIR_RXERIF) == NRC_SUCCESS, "clear RXERIF failed", out);
+      return NRC_FAIL;
     }
+    
     next_packet_addr = header.next_packet_low + (header.next_packet_high << 8);
 
     // read packet content
@@ -1705,7 +1698,10 @@ emac_enc28j60_init(esp_eth_mac_t* mac)
   MAC_CHECK(enc28j60_setup_default(emac) == NRC_SUCCESS, "enc28j60 default setup failed", out, NRC_FAIL);
   /* clear multicast hash table */
   MAC_CHECK(enc28j60_clear_multicast_table(emac) == NRC_SUCCESS, "clear multicast table failed", out, NRC_FAIL);
-
+  /* clear powersave mode */
+  MAC_CHECK(enc28j60_do_bitwise_clr(emac, ENC28J60_ECON2, ECON2_PWRSV) == NRC_SUCCESS, "clr ECON2_PWRSV failed", out, NRC_FAIL);
+  MAC_CHECK(enc28j60_do_bitwise_clr(emac, ENC28J60_ECON2, ECON2_VRPS) == NRC_SUCCESS, "clr ECON2_VRPS failed", out, NRC_FAIL);
+  
 #ifdef ENABLE_ETHERNET_INTERRUPT
   if (nrc_gpio_register_interrupt_handler(INT_VECTOR0, emac->int_gpio_num, enc28j60_intr_handler) == NRC_SUCCESS) {
     V(TT_NET, "[%s] interrupt handler installed\n", __func__);

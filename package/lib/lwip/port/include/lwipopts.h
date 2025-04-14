@@ -414,7 +414,7 @@ a lot of data that needs to be copied, this should be set high. */
 #define LWIP_BRIDGE_BOUNCE_FIX         1
 
 /* LWIP_BRIDGE_ROAMING==1: Enable port roaming on bridge interface */
-#define LWIP_BRIDGE_ROAMING         0
+// #define LWIP_BRIDGE_ROAMING         1
 
 /* STATIC_ARP_ENTRY_DHCP_SERVER==1: Enable static arp about DHCP server */
 #define STATIC_ARP_ENTRY_DHCP_SERVER            1

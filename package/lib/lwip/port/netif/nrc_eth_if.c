@@ -67,7 +67,7 @@ ATTR_NC __attribute__((optimize("O3"))) static err_t nrc_eth_output( struct neti
 {
 	struct pbuf *q;
 	err_t xReturn = ERR_OK;
-	uint8_t buffer[ETH_MAX_PACKET_SIZE];
+	uint8_t buffer[ETH_MAX_PACKET_SIZE+1];
 	uint32_t length = 0;
 
 	if (netif_is_link_up(net_if)) {
