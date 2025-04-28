@@ -1821,7 +1821,7 @@ static void enc28j60_reset_tx(emac_enc28j60_t *emac)
 
     no_resets++;
     
-    if(no_resets > MAX_RETRY_COUNT) {
+    if(no_resets > 3) {
       E(TT_NET, "[%s] no_resets  %d, restart\n", __func__, no_resets);
       nrc_sw_reset();
     }
