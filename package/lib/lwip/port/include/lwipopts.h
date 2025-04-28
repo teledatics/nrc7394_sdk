@@ -105,7 +105,7 @@ extern int ip4_input_nat(struct pbuf *p, struct netif *inp);
 #endif /* defined(INCLUDE_TRACE_ALWAYS) */
 #ifdef LWIP_DEBUG
 
-#define LWIP_DBG_MIN_LEVEL        LWIP_DBG_LEVEL_ALL // LWIP_DBG_LEVEL_SERIOUS
+#define LWIP_DBG_MIN_LEVEL         LWIP_DBG_LEVEL_ALL // LWIP_DBG_LEVEL_SERIOUS
 #define PPP_DEBUG                  LWIP_DBG_OFF
 #define MEM_DEBUG                  LWIP_DBG_OFF
 #define MEMP_DEBUG                 LWIP_DBG_OFF
@@ -184,6 +184,14 @@ this.
    byte alignment -> define MEM_ALIGNMENT to 2. */
 #define MEM_ALIGNMENT           4
 
+// Disable unnecessary copying if you use DMA/zero-copy
+#define LWIP_NETIF_TX_SINGLE_PBUF   1
+#define LWIP_TCPIP_CORE_LOCKING     1
+
+// Enable zero-copy mode (if supported by your Ethernet driver)
+#define PBUF_POOL_USES_MEMP         1
+#define LWIP_SUPPORT_CUSTOM_PBUF    1
+
 /* MEM_SIZE: the size of the heap memory. If the application will send
 a lot of data that needs to be copied, this should be set high. */
 #if defined(TS8266) || defined(TR6260) || defined(NRC7392)
@@ -196,7 +204,7 @@ a lot of data that needs to be copied, this should be set high. */
    sends a lot of data out of ROM (or other static memory), this
    should be set high. */
 //#define MEMP_NUM_PBUF           16
-#define MEMP_NUM_PBUF           100
+#define MEMP_NUM_PBUF           50 //100
 
 /* MEMP_NUM_RAW_PCB: the number of UDP protocol control blocks. One
    per active RAW "connection". */
@@ -268,11 +276,11 @@ a lot of data that needs to be copied, this should be set high. */
 #if defined(TS8266) || defined(TR6260) || defined(NRC7392)
 #define PBUF_POOL_SIZE          5
 #else
-#define PBUF_POOL_SIZE          18
+#define PBUF_POOL_SIZE          20
 #endif
 
 /* PBUF_POOL_BUFSIZE: the size of each pbuf in the pbuf pool. */
-#define PBUF_POOL_BUFSIZE       1600
+#define PBUF_POOL_BUFSIZE       1520
 
 /* PBUF_LINK_HLEN: the number of bytes that should be allocated for a
    link level header. */
@@ -298,10 +306,10 @@ a lot of data that needs to be copied, this should be set high. */
 
 /* TCP sender buffer space (pbufs). This must be at least = 2 *
    TCP_SND_BUF/TCP_MSS for things to work. */
-#define TCP_SND_QUEUELEN        6 * TCP_SND_BUF/TCP_MSS
+#define TCP_SND_QUEUELEN        8 * TCP_SND_BUF/TCP_MSS
 
 /* TCP receive window. */
-#define TCP_WND                 (4 * TCP_MSS)
+#define TCP_WND                 (8 * TCP_MSS)
 
 /* Maximum number of retransmissions of data segments. */
 #define TCP_MAXRTX              12
@@ -314,7 +322,6 @@ a lot of data that needs to be copied, this should be set high. */
 
 /* TCP_WND_UPDATE_THRESHOLD: difference in window to trigger anexplicit window update and defined as LWIP_MIN((TCP_WND / 4), (TCP_MSS * 4)) in opt.h */
 #define TCP_WND_UPDATE_THRESHOLD        (TCP_WND/2)
-
 
 /* ---------- ARP options ---------- */
 #define LWIP_ARP		1
@@ -446,5 +453,16 @@ extern void sntp_set_system_time (unsigned long sec, unsigned long us);
 
 extern void sntp_get_system_time (unsigned long *sec, unsigned long *us);
 #define SNTP_GET_SYSTEM_TIME(sec, us) 		sntp_get_system_time(sec, us)
+
+// Safe checksum computation
+#define CHECKSUM_GEN_IP             1
+#define CHECKSUM_GEN_UDP            1
+#define CHECKSUM_GEN_TCP            1
+#define CHECKSUM_CHECK_IP           1
+#define CHECKSUM_CHECK_UDP          1
+#define CHECKSUM_CHECK_TCP          1
+
+// Efficient checksum calculation
+#define LWIP_CHECKSUM_ON_COPY       1
 
 #endif /* __LWIPOPTS_H__ */

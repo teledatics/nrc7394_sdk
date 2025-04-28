@@ -464,13 +464,13 @@ nrc_err_t ethernet_init(spi_device_t *eth_spi, uint8_t *mac_addr, int gpio_int_p
 		mac->set_addr(mac, mac_addr);
 	}
 
-    /* set ethernet interface in promiscuous mode to act as bridge */
+	/* set ethernet interface in promiscuous mode to act as bridge */
 	mac->set_promiscuous(mac, true);
 
-    /* attach Ethernet driver to TCP/IP stack */
-    nrc_bind_eth_if(mac);
+	/* attach Ethernet driver to TCP/IP stack */
+	nrc_bind_eth_if(mac);
 
-    /* start Ethernet driver state machine */
+	/* start Ethernet driver state machine */
 	if (esp_eth_start(eth_handle) != NRC_SUCCESS) {
 		nrc_usr_print("[%s] Error starting ethernet...\n", __func__);
 		return NRC_FAIL;

@@ -192,7 +192,7 @@ nrc_err_t esp_eth_driver_install(const esp_eth_config_t *config, esp_eth_handle_
     eth_driver->mac = mac;
     eth_driver->phy = phy;
     eth_driver->link = ETH_LINK_DOWN;
-    eth_driver->duplex = ETH_DUPLEX_HALF;
+    eth_driver->duplex = ETH_DUPLEX_FULL;
     eth_driver->speed = ETH_SPEED_10M;
     eth_driver->stack_input = config->stack_input;
     eth_driver->on_lowlevel_init_done = config->on_lowlevel_init_done;

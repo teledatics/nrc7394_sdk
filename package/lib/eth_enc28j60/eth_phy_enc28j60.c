@@ -12,13 +12,28 @@
 #include "nrc_sdk.h"
 #include "enc28j60.h"
 
+#define MAX_REG_RETRY_COUNT 10
+#define delay_us(x) vTaskDelay(pdMS_TO_TICKS(x) / 1000)
+
 static const char* TAG = "enc28j60";
+/*
 #define PHY_CHECK(a, str, goto_tag, ...)                                       \
-  do {                                                                         \
+  do {                                                                        \
     if (!(a)) {                                                                \
       E(TT_NET, "%s (%d): " str, __FUNCTION__, __LINE__, ##__VA_ARGS__);   \
       goto goto_tag;                                                           \
     }                                                                          \
+  } while (0)
+*/
+
+#define PHY_CHECK(a, str, goto_tag, ...)                                \
+  do {                                                                         \
+    int retry = MAX_REG_RETRY_COUNT;                                               \
+    if (!(a) || !(--retry)) {                                                  \
+      E(TT_NET, "%s (%d):" str  "\n", __FUNCTION__, __LINE__, ##__VA_ARGS__);  \
+      goto goto_tag;                                                           \
+    }                                                                          \
+    delay_us(1);                                                              \
   } while (0)
 
 /***************Vendor Specific Register***************/
@@ -147,10 +162,8 @@ enc28j60_update_link_duplex_speed(phy_enc28j60_t* enc28j60)
             } else {
                 duplex = ETH_DUPLEX_HALF;
             }
-            PHY_CHECK(eth->on_state_changed(eth, ETH_STATE_SPEED, (void *)speed) == NRC_SUCCESS,
-                      "change speed failed", err);
-            PHY_CHECK(eth->on_state_changed(eth, ETH_STATE_DUPLEX, (void *)duplex) == NRC_SUCCESS,
-                      "change duplex failed", err);
+            PHY_CHECK(eth->on_state_changed(eth, ETH_STATE_SPEED, (void *)speed) == NRC_SUCCESS, "change speed failed", err);
+            PHY_CHECK(eth->on_state_changed(eth, ETH_STATE_DUPLEX, (void *)duplex) == NRC_SUCCESS, "change duplex failed", err);
         }
         PHY_CHECK(eth->on_state_changed(eth, ETH_STATE_LINK, (void *)link) == NRC_SUCCESS,
                   "change link failed", err);
