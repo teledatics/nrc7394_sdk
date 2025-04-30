@@ -19,6 +19,8 @@
 #include "nrc_eth_if.h"
 #endif
 
+#include "arch/aligned_pbufs.h"
+
 /* FreeRTOS includes. */
 #include "FreeRTOS.h"
 
@@ -236,13 +238,17 @@ void lwif_input(struct nrc_wpa_if* intf, void *buffer, int data_len)
 	struct etharp_hdr *arp_hdr;
 	struct ip_hdr *ip_hdr;
 
-	V(TT_NET, "[%s] input length = %d...\n", __func__, data_len);
-	
+	E(TT_NET, "[%s] input length = %d...\n", __func__, data_len);
+#ifdef NRC7394_DMA_MEMPOOL
+	/* zero-copy: grab a DMA-aligned pbuf directly */
+	p = dma_aligned_pbuf_alloc(len);
+	if (p) {
+#else
 	p = pbuf_alloc( PBUF_RAW, len, PBUF_POOL );
-
+	
 	if( p != NULL )
 	{
-		for( q = p; q != NULL; (q = q->next)&&remain )
+		for (q = p; q != NULL && remain > 0; q = q->next) {
 		{
 			/* Read enough bytes to fill this pbuf in the chain. The
 			   available data in the pbuf is given by the q->len variable. */
@@ -250,8 +256,10 @@ void lwif_input(struct nrc_wpa_if* intf, void *buffer, int data_len)
 			remain -= q->len;
 			offset += q->len;
 		}
+#endif
 		LINK_STATS_INC(link.recv);
 	}
+
 	else
 	{
 		E(TT_NET, "[%s] pbuf_alloc failed\n", __func__);

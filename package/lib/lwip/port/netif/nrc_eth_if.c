@@ -30,6 +30,8 @@
 #include "nrc_eth_if.h"
 #include "standalone.h"
 
+#include "arch/aligned_pbufs.h"
+
 struct netif eth_netif;
 #if LWIP_BRIDGE
 extern struct netif br_netif;
@@ -282,7 +284,7 @@ ATTR_NC __attribute__((optimize("O3"))) static nrc_err_t eth_stack_input_handler
 
 	if ((buffer == NULL) || !netif_is_up(&eth_netif)) {
 		if (buffer) {
-			vPortFree(buffer);
+			MEM_FREE(buffer);
 		}
 		return NRC_FAIL;
 	}
@@ -320,9 +322,12 @@ ATTR_NC __attribute__((optimize("O3"))) static nrc_err_t eth_stack_input_handler
 #endif /* PPPOE_SUPPORT */
 		case ETHTYPE_IP:
 			V(TT_NET, "[%s] eth_copy_buffer_to_pbuf...\n", __func__);
+#ifdef NRC7394_DMA_MEMPOOL
+			if ((p = pbuf_from_payload(buffer)) == NULL) {
+#else
 			if ((p = eth_copy_buffer_to_pbuf(buffer, length)) == NULL) {
-				vPortFree(buffer);
-				buffer = NULL;
+#endif
+				MEM_FREE(buffer);
 				V(TT_NET, "[%s] eth_copy_buffer_to_pbuf failed...\n", __func__, length);
 				return NRC_FAIL;
 			} else {
@@ -337,8 +342,10 @@ ATTR_NC __attribute__((optimize("O3"))) static nrc_err_t eth_stack_input_handler
 			V(TT_NET, "[%s] unknown packet...\n", __func__);
 			break;
 	}
+#ifndef NRC7394_DMA_MEMPOOL
 	V(TT_NET, "[%s] free buffer...\n", __func__);
-	vPortFree(buffer);
+	MEM_FREE(buffer);
+#endif
 	return NRC_SUCCESS;
 }
 
@@ -413,7 +420,7 @@ int nat_add(struct netif *out_if, struct netif *in_if)
 	ret = nat_rule_add(rule);
 	if (ret < 0) {
 		nrc_usr_print("[%s] nat rule addition failed...\n", __func__);
-		vPortFree(rule);
+		MEM_FREE(rule);
 	}
 
 	nrc_usr_print("[%s] returning...\n", __func__);

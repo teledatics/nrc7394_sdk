@@ -188,10 +188,6 @@ this.
 #define LWIP_NETIF_TX_SINGLE_PBUF   1
 #define LWIP_TCPIP_CORE_LOCKING     1
 
-// Enable zero-copy mode (if supported by your Ethernet driver)
-#define PBUF_POOL_USES_MEMP         1
-#define LWIP_SUPPORT_CUSTOM_PBUF    1
-
 /* MEM_SIZE: the size of the heap memory. If the application will send
 a lot of data that needs to be copied, this should be set high. */
 #if defined(TS8266) || defined(TR6260) || defined(NRC7392)
@@ -199,12 +195,6 @@ a lot of data that needs to be copied, this should be set high. */
 #else
 #define MEM_SIZE                20000
 #endif
-
-/* MEMP_NUM_PBUF: the number of memp struct pbufs. If the application
-   sends a lot of data out of ROM (or other static memory), this
-   should be set high. */
-//#define MEMP_NUM_PBUF           16
-#define MEMP_NUM_PBUF           50 //100
 
 /* MEMP_NUM_RAW_PCB: the number of UDP protocol control blocks. One
    per active RAW "connection". */
@@ -273,10 +263,28 @@ a lot of data that needs to be copied, this should be set high. */
 
 /* ---------- Pbuf options ---------- */
 /* PBUF_POOL_SIZE: the number of buffers in the pbuf pool. */
-#if defined(TS8266) || defined(TR6260) || defined(NRC7392)
-#define PBUF_POOL_SIZE          5
+#ifdef NRC7394_DMA_MEMPOOL
+# define PBUF_POOL_SIZE 0   // We're not using LwIP’s own pool
+#elif defined(TS8266) || defined(TR6260) || defined(NRC7392)
+# define PBUF_POOL_SIZE          5
 #else
-#define PBUF_POOL_SIZE          20
+# define PBUF_POOL_SIZE          20
+#endif
+
+/* MEMP_NUM_PBUF: the number of memp struct pbufs. If the application
+   sends a lot of data out of ROM (or other static memory), this
+   should be set high. */
+#ifdef NRC7394_DMA_MEMPOOL
+
+#define MEM_LIBC_MALLOC   0
+#define MEMP_MEM_MALLOC   1
+#define mem_malloc(sz)            MEM_MALLOC(sz)
+// #define mem_free(ptr)             MEM_FREE(ptr)
+#define MEMP_NUM_PBUF               0 
+#define PBUF_POOL_USES_MEMP         1
+#define LWIP_SUPPORT_CUSTOM_PBUF    1
+#else
+#define MEMP_NUM_PBUF             100
 #endif
 
 /* PBUF_POOL_BUFSIZE: the size of each pbuf in the pbuf pool. */

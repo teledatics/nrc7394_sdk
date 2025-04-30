@@ -14,6 +14,7 @@
 
 #include "api_dma.h"
 #include "api_spi_dma.h"
+#include "arch/aligned_pbufs.h"
 
 #define DUMP_HEX(title, buf, len)                                \
   do {                                                           \
@@ -25,6 +26,12 @@
     if ((len) % 16 != 0) printf("\n");                           \
   } while (0)
 
+#ifdef NRC7394_DMA_MEMPOOL
+#define DMA_ALIGNED_DEBUG 1
+// for custom pbufs code, see lwip/port/arch/aligned_pufs.c
+// #define DMA_ALIGNED_RING_BUFFER 1
+#endif
+  
 #ifdef ETHERNET_SPI_DMA
 #undef ETHERNET_DYNAMIC_BUFFERS
 
@@ -410,43 +417,6 @@ spi_write(spi_device_t* spi, u8* data, int len)
   return ret;
 }
 
-ATTR_NC __attribute__((optimize("O3"))) static inline void* unalign_aligned_buffer(uint8_t *aligned_buffer)
-{
-  return ((void**)aligned_buffer)[-1];
-}
-
-ATTR_NC __attribute__((optimize("O3"))) static inline void* aligned_malloc(size_t size, size_t alignment)
-{
-    uintptr_t raw;
-    int retry_alloc = MAX_RETRY_COUNT;
-
-    do {
-          raw = (uintptr_t)nrc_mem_malloc(size + alignment - 1 + sizeof(void*));
-
-          if (!raw) {
-            // E(TT_NET, "[%s] buffer allocation failed, waiting to recover retry_alloc %d\n", __func__, retry_alloc);
-            delay_us(100);
-          }
-    } while (!raw && (--retry_alloc) > 0);
-
-    if (!raw) {
-      E(TT_NET, "[%s] buffer allocation failed\n", __func__);
-      return NULL;
-    }
-
-    uintptr_t aligned = (raw + sizeof(void*) + alignment - 1) & ~(alignment - 1);
-    ((void**)aligned)[-1] = (void*)raw;  // store original pointer
-    return (void*)aligned;
-}
-
-ATTR_NC __attribute__((optimize("O3"))) static inline void aligned_free(void* ptr)
-{
-    nrc_usr_print("[%s]\n",__func__);
-
-    if (ptr)
-        nrc_mem_free(((void**)ptr)[-1]);
-}
-
 #ifdef ETHERNET_SPI_DMA
 ATTR_NC __attribute__((optimize("O3"))) static void spi_dma_start_xfer(spi_device_t *spi)
 {
@@ -580,8 +550,8 @@ static nrc_err_t dma_init_nodes(void)
 
   for (int i = 0; i < RX_NODE_COUNT; i++)
   {
-    rx_nodes[i].aligned_packet_buffer = aligned_malloc(MAX_ETH_FRAME_SIZE, 4);
-    if(!rx_nodes[i].aligned_packet_buffer[-1]) {
+    rx_nodes[i].aligned_packet_buffer = MEM_MALLOC(MAX_ETH_FRAME_SIZE);
+    if (!rx_nodes[i].aligned_packet_buffer) {
       ret = NRC_FAIL;
       break;
     }
@@ -2084,8 +2054,8 @@ static void emac_enc28j60_task(void *arg)
       if (node->packet_length < MIN_ETH_FRAME_SIZE || node->packet_length > MAX_ETH_FRAME_SIZE) {
         E(TT_NET, "[%s] bogus node, node->packet_length %d\n", __func__, node->packet_length);
         if(node->aligned_packet_buffer) {
-          aligned_free(node->aligned_packet_buffer);
-          node->aligned_packet_buffer = aligned_malloc(MAX_ETH_FRAME_SIZE, 4);
+          MEM_FREE(node->aligned_packet_buffer);
+          node->aligned_packet_buffer = MEM_MALLOC(MAX_ETH_FRAME_SIZE);
         }
         node->packet_length = 0;
         node->state = NODE_FREE;
@@ -2208,7 +2178,7 @@ emac_enc28j60_task(void* arg)
           int retry_alloc = MAX_RETRY_COUNT;
           do {
             length = ETH_MAX_PACKET_SIZE;
-            buffer = nrc_mem_malloc(length);
+            buffer = MEM_MALLOC(length);
 
             if (!buffer) {
                E(TT_NET, "[%s] buffer allocation failed, waiting to recover retry_alloc %d\n", __func__, retry_alloc);
@@ -2223,15 +2193,19 @@ emac_enc28j60_task(void* arg)
             continue; // go check next packet
         }
         
+        // E(TT_NET, "[%s] emac->parent.receive\n", __func__);
         if (emac->parent.receive(&emac->parent, buffer, &length) == NRC_SUCCESS) {
           /* pass the buffer to stack (e.g. TCP/IP layer) */
           if (length > 0) {
+            // E(TT_NET, "[%s] emac->eth->stack_input length %d\n", __func__, length);
             emac->eth->stack_input(emac->eth, buffer, length);
           } else {
-            free(buffer);
+            E(TT_NET, "[%s] MEM_FREE #1\n", __func__);
+            MEM_FREE(buffer);
           }
         } else {
-          free(buffer);
+          E(TT_NET, "[%s] MEM_FREE #2\n", __func__);
+          MEM_FREE(buffer);
         }
       } while (emac->packets_remain);
     }
@@ -2573,20 +2547,11 @@ emac_enc28j60_get_chip_info(esp_eth_mac_t* mac)
 #ifdef ETHERNET_DYNAMIC_BUFFERS
 ATTR_NC __attribute__((optimize("O3"))) static nrc_err_t init_dynamic_buffers(void)
 {
-  int retry_cnt = 0;
-
-  do {
-    if (retry_cnt > MAX_RETRY_COUNT) {
-      E(TT_NET, "[%s] failed to allocate size %d\n", __func__, SPI_TRANSFER_BUF_LEN);
-      return NRC_FAIL;
-    }
-    spi_transfer_buf = nrc_mem_malloc(SPI_TRANSFER_BUF_LEN);
-    if (!spi_transfer_buf) {
-      // Memory allocation failed, wait for a short period before retrying
-      _delay_ms(1);
-    }
-    retry_cnt++;
-  } while (!spi_transfer_buf);
+  spi_transfer_buf = MEM_MALLOC(SPI_TRANSFER_BUF_LEN);
+  if (!spi_transfer_buf) {
+    E(TT_NET, "[%s] spi transfer buffer alloc failed\n", __func__);
+    return NRC_FAIL;
+  }
 
   return NRC_SUCCESS;
 }
@@ -2686,7 +2651,7 @@ emac_enc28j60_del(esp_eth_mac_t* mac)
   free(emac);
   
 #ifdef ETHERNET_DYNAMIC_BUFFERS
-  free(spi_transfer_buf);
+  MEM_FREE(spi_transfer_buf);
 #endif
 
 #ifdef ETHERNET_SPI_DMA
@@ -2694,6 +2659,8 @@ emac_enc28j60_del(esp_eth_mac_t* mac)
        vSemaphoreDelete(rx_sem);
     if(tx_sem)
        vSemaphoreDelete(tx_sem);
+
+      dma_aligned_pbuf_pool_deinit();
 #ifdef ETHERNET_SPI_DMA_CHAINED
     // if(rx_ready_queue)
       // xQueueDelete(rx_ready_queue);
@@ -2768,6 +2735,7 @@ esp_eth_mac_new_enc28j60(spi_device_t *enc28j60_spi,
   MAC_CHECK(rx_sem, "create rx_sem semaphore failed", err, NULL);
   tx_sem = xSemaphoreCreateBinary();
   MAC_CHECK(rx_sem, "create tx_sem semaphore failed", err, NULL);
+  dma_aligned_pbuf_pool_init();
 #ifdef ETHERNET_SPI_DMA_CHAINED
   rx_ready_queue = xQueueCreate(RX_NODE_COUNT, sizeof(rx_node_t *));
   MAC_CHECK(rx_ready_queue, "create rx_ready_queue queue failed", err, NULL);
@@ -2813,7 +2781,7 @@ err:
       // xQueueDelete(rx_ready_queue);
 #endif /* ETHERNET_SPI_DMA_CHAINED */
 #endif /* ETHERNET_SPI_DMA */
-    free(emac);
+    MEM_FREE(emac);
   }
   return ret;
 }
