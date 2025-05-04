@@ -126,7 +126,8 @@ LWIP_PORTING = \
 	wlif.c \
 	nrc_ping.c \
 	nrc_iperf.c \
-	nrc_lwip.c
+	nrc_lwip.c \
+	aligned_pbufs.c
 
 # LWIP NAT FILES
 LWIP_NAT_FILES = \

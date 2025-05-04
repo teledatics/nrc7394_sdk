@@ -248,7 +248,7 @@ void lwif_input(struct nrc_wpa_if* intf, void *buffer, int data_len)
 	
 	if( p != NULL )
 	{
-		for (q = p; q != NULL && remain > 0; q = q->next) {
+		for (q = p; q != NULL && remain > 0; q = q->next)
 		{
 			/* Read enough bytes to fill this pbuf in the chain. The
 			   available data in the pbuf is given by the q->len variable. */

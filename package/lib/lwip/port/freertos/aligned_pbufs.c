@@ -17,6 +17,8 @@
 #include "nrc_sdk.h"
 #include "aligned_pbufs.h"
 
+#ifdef NRC7394_DMA_MEMPOOL
+
 // #define DMA_ALIGNED_DEBUG 1
 #ifdef DMA_ALIGNED_DEBUG
     #define DBG_PRINT(fmt, ...) nrc_usr_print("[DMA_DBG] %s:%d: " fmt, __func__, __LINE__, ##__VA_ARGS__)
@@ -249,3 +251,5 @@ void dma_aligned_pbuf_free(struct pbuf *p)
     
     DBG_PRINT("entry returned to ring at tail=%zu\n", __func__, dma_aligned_tail);
 }
+
+#endif /* NRC7394_DMA_MEMPOOL */

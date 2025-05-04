@@ -14,7 +14,8 @@
 
 #include "api_dma.h"
 #include "api_spi_dma.h"
-#include "arch/aligned_pbufs.h"
+
+#include <cmsis_gcc.h>
 
 #define DUMP_HEX(title, buf, len)                                \
   do {                                                           \
@@ -27,11 +28,11 @@
   } while (0)
 
 #ifdef NRC7394_DMA_MEMPOOL
-#define DMA_ALIGNED_DEBUG 1
+#define DMA_ALIGNED_PBUF_POOL_SIZE 30
+#include "arch/aligned_pbufs.h"
 // for custom pbufs code, see lwip/port/arch/aligned_pufs.c
-// #define DMA_ALIGNED_RING_BUFFER 1
 #endif
-  
+
 #ifdef ETHERNET_SPI_DMA
 #undef ETHERNET_DYNAMIC_BUFFERS
 
@@ -55,9 +56,7 @@ typedef enum {
 
 static volatile bool spi_dma_busy = false;
 
-// #define ETHERNET_SPI_DMA_CHAINED 1
-
-#ifdef ETHERNET_SPI_DMA_CHAINED
+#ifdef SPI_DMA_CHAINED
 
 #define DMA_CHAIN_LIMIT 3
 
@@ -74,14 +73,6 @@ volatile uint8_t current_pkt_count = 0;
 
 volatile uint8_t event_flags = EVT_IDLE;
 
-// ISR chain events
-typedef enum {
-    DMA_STATE_IDLE,
-    DMA_STATE_PAYLOAD_IN_PROGRESS,
-} dma_transfer_state_t;
-
-static volatile dma_transfer_state_t dma_state = DMA_STATE_IDLE;
-
 static volatile int dma_chain_depth = 0;
 
 #define SPI_IDLE_POLL_CYCLES 100
@@ -95,16 +86,17 @@ typedef enum {
 static volatile spi_owner_t spi_owner = SPI_OWNER_NONE;
 
 typedef enum {
-    NODE_FREE = 0,
-    NODE_HEADER_READY,
-    NODE_PACKET_READY,
+    RX_NODE_IDLE = 0,
+    RX_NODE_DMA_IN_PROGRESS,
+    RX_NODE_READY_FOR_LWIP
 } rx_node_state_t;
 
 #define HEADER_SIZE    6
+
 typedef struct {
     rx_node_state_t state;
-    uint8_t __attribute__((aligned(4))) header[HEADER_SIZE];  // Static aligned header buffer
-    uint8_t *aligned_packet_buffer;                           // Dynamically allocated aligned buffer for DMA
+    uint8_t __attribute__((aligned(4))) header[HEADER_SIZE];
+    uint8_t *aligned_packet_buffer;
     uint16_t packet_length;
 } rx_node_t;
 
@@ -113,10 +105,14 @@ typedef struct {
 static rx_node_t rx_nodes[RX_NODE_COUNT];
 static rx_node_t *current_dma_node = NULL;
 
+/* [Modified] TX frame tracking for DMA-based transmit */
+static volatile uint16_t tx_frame_len = 0;    // current TX frame length (no CRC)
+static volatile uint8_t *tx_frame_data = NULL; // pointer to TX frame buffer (with control for small frames)
+
 // task read pkt queue
 static QueueHandle_t rx_ready_queue;
+#endif
 
-#endif /*#ifdef ETHERNET_SPI_DMA_CHAINED */
 #endif /* #ifdef ETHERNET_SPI_DMA */
 
 #ifndef ETHERNET_DYNAMIC_BUFFERS
@@ -136,7 +132,7 @@ uint8_t *spi_transfer_buf;
 
 static const char* TAG = "enc28j60";
 
-#define ENC28J60_DEBUG 1
+// #define ENC28J60_DEBUG 1
 
 #ifdef ENC28J60_DEBUG
 #define MAC_CHECK(a, str, goto_tag, ret_value, ...)                            \
@@ -247,7 +243,7 @@ typedef struct
   esp_eth_mediator_t* eth;
   const eth_mac_config_t* mac_config;
   spi_device_t spi_hdl;
-  SemaphoreHandle_t spi_lock;
+  volatile uint32_t spi_lock;
   SemaphoreHandle_t reg_trans_lock;
   SemaphoreHandle_t tx_ready_sem;
   TaskHandle_t rx_task_hdl;
@@ -266,52 +262,46 @@ typedef struct
 
 static emac_enc28j60_t* gemac = NULL;
 
+static TaskHandle_t waiting_task = NULL;
+
 ATTR_NC __attribute__((optimize("O3"))) static inline bool
 enc28j60_spi_lock(emac_enc28j60_t* emac)
 {
-  BaseType_t is_locked = pdFALSE;
+    bool acquired = false;
 
-#ifdef ETHERNET_SPI_DMA_CHAINED
-#ifdef ENC28J60_DEBUG
-  switch(spi_owner)
-  {
-    case SPI_OWNER_TASK:
-      nrc_usr_print("[%s] SPI_OWNER_TASK\n",__func__);
-      break;
-    case SPI_OWNER_DMA_ISR:
-      nrc_usr_print("[%s] SPI_OWNER_DMA_ISR\n",__func__);
-      break;
-    case SPI_OWNER_NONE:
-    default:
-      nrc_usr_print("[%s] SPI_OWNER_NONE\n",__func__);
-      break;
-  }
+    
+    while (1) 
+    {
+        __disable_irq();
+        if (emac->spi_lock == 0) {
+            emac->spi_lock = 1;
+            __enable_irq();
+            acquired = true;
+            break;
+        }
+        waiting_task = xTaskGetCurrentTaskHandle();
+        __enable_irq();
+#ifdef ENC28J60_DEBUG        
+        nrc_usr_print("[%s] yielding...\n",__func__);
 #endif
-  while (spi_owner != SPI_OWNER_NONE) 
-  {
-    E(TT_NET, "waiting to take SPI from ISR\n");
-    delay_us(10);  // Wait for SPI until ISR finished
-  }
-  spi_owner = SPI_OWNER_TASK;
-  E(TT_NET, "SPI_OWNER_TASK\n");
-#endif
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    }
 
-  is_locked = xSemaphoreTake(emac->spi_lock, pdMS_TO_TICKS(ENC28J60_SPI_LOCK_TIMEOUT_MS));
-  
-  if(!is_locked)
-    E(TT_NET, "spi_lock timed out, not locked\n");
-  
-  return (is_locked == pdTRUE);
+    return acquired;
 }
 
 ATTR_NC __attribute__((optimize("O3"))) static inline bool
 enc28j60_spi_unlock(emac_enc28j60_t* emac)
 {
-#ifdef ETHERNET_SPI_DMA_CHAINED
-  if (spi_owner == SPI_OWNER_TASK) 
-    spi_owner = SPI_OWNER_NONE;
-#endif
-  return xSemaphoreGive(emac->spi_lock) == pdTRUE;
+    __disable_irq();
+    emac->spi_lock = 0;
+    if (waiting_task) {
+      xTaskNotifyGive(waiting_task);
+    }
+    waiting_task = NULL;
+    __enable_irq();
+
+    return true;
 }
 
 ATTR_NC __attribute__((optimize("O3"))) static inline bool
@@ -466,398 +456,71 @@ static int init_dma_desc(bool tx, uint32_t addr, size_t size)
 	return 0;
 }
 
-#ifdef ETHERNET_SPI_DMA_CHAINED
-
-static nrc_err_t enc28j60_register_read(emac_enc28j60_t* emac, uint16_t reg_addr, uint8_t* value);
-static nrc_err_t enc28j60_register_write(emac_enc28j60_t* emac, uint16_t reg_addr, uint8_t value);
-static nrc_err_t enc28j60_clear_buferr(emac_enc28j60_t *emac);
-static nrc_err_t enc28j60_do_bitwise_set(emac_enc28j60_t* emac, uint8_t reg_addr, uint8_t mask);
-static int spi_read_buf(spi_device_t* spi, int len, u8* data);
-static void enc28j60_spi_rx_dma_err_isr (int channel);
-static void enc28j60_spi_rx_dma_isr (int channel);
-
 #define SPI_BSY_BIT    (1 << 4)
 static inline bool spi_is_idle(void)
 {
     return (RegSSP_SR(SSP0_BASE_ADDR) & SPI_BSY_BIT) == 0;
 }
 
-static void defer_to_task(void)
+#if defined(ETHERNET_SPI_DMA) && defined(SPI_DMA_CHAINED)
+static bool start_next_dma_transfer(void) 
 {
-    BaseType_t high_task_wakeup = pdFALSE;
+    for (int i = 0; i < RX_NODE_COUNT; i++) {
+        if (rx_nodes[i].state == RX_NODE_IDLE) {
+            rx_nodes[i].aligned_packet_buffer = MEM_MALLOC(ALIGNED_MAX_PACKET_SIZE);
+            if (!rx_nodes[i].aligned_packet_buffer) {
+                return false;  // Allocation failure
+            }
 
-    vTaskNotifyGiveFromISR(gemac->rx_task_hdl, &high_task_wakeup);
+            rx_nodes[i].state = RX_NODE_DMA_IN_PROGRESS;
+            current_dma_node = &rx_nodes[i];
 
-    if (high_task_wakeup != pdFALSE) {
-      portYIELD_FROM_ISR(high_task_wakeup);
+            spi_dma_read(current_dma_node->header, HEADER_SIZE);
+            uint16_t packet_length = enc28j60_peek_packet_length();
+            spi_dma_read(current_dma_node->aligned_packet_buffer, packet_length);
+
+            return true;
+        }
     }
+    return false;  // No idle nodes available
 }
-
-static void isr_return_spi_to_idle(void)
-{
-  if(spi_owner == SPI_OWNER_DMA_ISR)
-    spi_owner = SPI_OWNER_NONE;
-}
-
-static bool isr_grab_spi_from_task(void)
-{
-  nrc_usr_print("[%s]\n",__func__);
-
-  switch(spi_owner)
-  {
-    case SPI_OWNER_TASK:
-      nrc_usr_print("[%s] SPI_OWNER_TASK\n",__func__);
-      break;
-    case SPI_OWNER_DMA_ISR:
-      nrc_usr_print("[%s] SPI_OWNER_DMA_ISR\n",__func__);
-      break;
-    case SPI_OWNER_NONE:
-    default:
-      nrc_usr_print("[%s] SPI_OWNER_NONE\n",__func__);
-      break;
-  }
-  
-  if (spi_owner == SPI_OWNER_NONE) {
-    spi_owner = SPI_OWNER_DMA_ISR;
-    nrc_usr_print("[%s] SPI_OWNER_DMA_ISR\n",__func__);
-    return true;
-  }
-
-  if (spi_owner == SPI_OWNER_TASK) {
-    int poll_count = SPI_IDLE_POLL_CYCLES;
-    while (poll_count-- > 0)
-    {
-      if (spi_is_idle()) {
-        spi_owner = SPI_OWNER_DMA_ISR;
-        nrc_usr_print("[%s] SPI_OWNER_DMA_ISR\n",__func__);
-        return true;
-      }
-      delay_us(5);
-    }
-    nrc_usr_print("[%s] timeout, failed to become spi_owner\n",__func__);
-    return false;
-  }
-  
-  nrc_usr_print("[%s] end of function, failed to become spi_owner\n",__func__);
-  return false;
-}
-
-static nrc_err_t dma_init_nodes(void)
-{
-  nrc_err_t ret = NRC_SUCCESS;
-
-  nrc_usr_print("[%s]\n",__func__);
-
-  for (int i = 0; i < RX_NODE_COUNT; i++)
-  {
-    rx_nodes[i].aligned_packet_buffer = MEM_MALLOC(MAX_ETH_FRAME_SIZE);
-    if (!rx_nodes[i].aligned_packet_buffer) {
-      ret = NRC_FAIL;
-      break;
-    }
-    rx_nodes[i].packet_length == 0;
-    rx_nodes[i].state == NODE_FREE;
-  }
-
-  return ret;
-}
-
-rx_node_t* dma_find_free_node(void)
-{
-  for (int i = 0; i < RX_NODE_COUNT; i++)
-  {
-    if (rx_nodes[i].state == NODE_FREE) {
-      rx_nodes[i].state = NODE_HEADER_READY;
-      return &rx_nodes[i];
-    }
-  }
-
-  return NULL;
-}
-
-void enc28j60_isr_clr_bit(uint16_t reg, uint8_t val)
-{
-  // spi_transfer_buf[0] = ENC28J60_BIT_FIELD_CLR | (reg & ADDR_MASK);
-  // spi_transfer_buf[1] = val;
-  // nrc_spi_start_xfer(&gemac->spi_hdl);
-  // nrc_spi_xfer(&gemac->spi_hdl, spi_transfer_buf, spi_transfer_buf, 2);
-  // nrc_spi_stop_xfer(&gemac->spi_hdl);
-
-  nrc_spi_writebyte_value(&gemac->spi_hdl, ENC28J60_BIT_FIELD_CLR | (reg & ADDR_MASK), val);
-}
-
-void enc28j60_isr_set_bit(uint16_t reg, uint8_t val)
-{
-  // spi_transfer_buf[0] = ENC28J60_BIT_FIELD_SET | (reg & ADDR_MASK);
-  // spi_transfer_buf[1] = val;
-  // nrc_spi_start_xfer(&gemac->spi_hdl);
-  // nrc_spi_xfer(&gemac->spi_hdl, spi_transfer_buf, spi_transfer_buf, 2);
-  // nrc_spi_stop_xfer(&gemac->spi_hdl);
-  nrc_spi_writebyte_value(&gemac->spi_hdl, ENC28J60_BIT_FIELD_SET | (reg & ADDR_MASK), val);
-}
-
-void enc28j60_isr_set_bank(uint16_t reg)
-{
-  nrc_err_t ret;
-  uint8_t bank = (reg & 0xF00) >> 8;
-
-  nrc_usr_print("[%s] reg 0x%X bank %d gemac->last_bank %d\n",__func__, reg, bank, gemac->last_bank);
-  
-  if(bank == gemac->last_bank) return;
-
-  enc28j60_isr_clr_bit(ENC28J60_ECON1, 0x03);
-  enc28j60_isr_set_bit(ENC28J60_ECON1, bank & 0x03);
-
-  gemac->last_bank = bank;
-  
-  nrc_usr_print("[%s] bank %d gemac->last_bank %d\n",__func__, bank, gemac->last_bank);
-}
-
-void enc28j60_isr_write_reg(uint16_t reg, uint8_t val)
-{
-  nrc_err_t ret;
-
-  nrc_usr_print("[%s] reg %d val 0x%X\n",__func__, reg, val);
-  
-  enc28j60_isr_set_bank(reg);
-
-  // spi_transfer_buf[0] = ENC28J60_WRITE_CTRL_REG | (reg & ADDR_MASK);
-  // spi_transfer_buf[1] = val;
-  // nrc_spi_start_xfer(&gemac->spi_hdl);
-  // ret = nrc_spi_xfer(&gemac->spi_hdl, spi_transfer_buf, spi_transfer_buf, 2);
-  nrc_spi_writebyte_value(&gemac->spi_hdl, (reg & ADDR_MASK) | ENC28J60_WRITE_CTRL_REG, val);
-  // nrc_spi_stop_xfer(&gemac->spi_hdl);
-}
-
-uint16_t enc28j60_isr_read_reg(uint16_t reg)
-{
-  uint16_t is_eth_reg = !(reg & 0xF000);
-  uint8_t val[2];
-  
-  enc28j60_isr_set_bank(reg);
-
-  nrc_usr_print("[%s] is_eth_reg %d reg 0x%X\n",__func__, is_eth_reg, reg);
-  
-  nrc_spi_writebyte_value(&gemac->spi_hdl, (reg & ADDR_MASK) | ENC28J60_READ_CTRL_REG, 0);
-  nrc_spi_readbyte_value(&gemac->spi_hdl, (reg & ADDR_MASK) | ENC28J60_READ_CTRL_REG, &val[0]);
-  nrc_usr_print("[%s] read value #1 %d\n",__func__, val[0]);
-  // if(is_eth_reg) {
-  //   nrc_spi_readbyte_value(&gemac->spi_hdl, (reg & ADDR_MASK) | ENC28J60_READ_CTRL_REG, &val[1]);
-  //   nrc_usr_print("[%s] read value #2 %d\n",__func__, val[1]);
-  // }
-
-  nrc_usr_print("[%s] returning value %d\n",__func__, val[0]);
- 
-  return val[0];
-}
-
-void enc28j60_isr_read_mem_nodma(uint8_t* buf, int len)
-{
-  uint8_t cmd = ENC28J60_READ_BUF_MEM;
-
-  // nrc_spi_start_xfer(&gemac->spi_hdl);
-  // for (int i = 0; i < len + 1; ++i) 
-  // {
-  //   uint8_t tx = (i == 0 ? cmd : 0x00);
-  //   uint8_t rx = 0x00;
-  //   nrc_spi_xfer(&gemac->spi_hdl, &tx, &rx, 1);  // transfer 1 byte
-  //   buf[i] = rx;
-  // }
-  // nrc_spi_stop_xfer(&gemac->spi_hdl);
-  nrc_spi_read_values(&gemac->spi_hdl, cmd, buf, len);
-}
-
-void enc28j60_isr_read_header(uint8_t* buf)
-{
-  uint8_t erdptl, erdpth;
-  uint16_t rdpt;
-  
-  erdptl = enc28j60_isr_read_reg(ENC28J60_ERDPTL);
-  erdpth = enc28j60_isr_read_reg(ENC28J60_ERDPTH);
-  rdpt = ((uint16_t)erdpth << 8) | erdptl;
-  nrc_usr_print("[%s]  erdptl 0x%X erdpth 0x%X rdpt 0x%X next_packet_ptr 0x%X\n",__func__, erdptl, erdpth, rdpt, gemac->next_packet_ptr);
-  enc28j60_isr_write_reg(ENC28J60_ERDPTL, erdptl);
-  enc28j60_isr_write_reg(ENC28J60_ERDPTH, erdpth);
-
-  enc28j60_isr_read_mem_nodma(buf, sizeof(enc28j60_rx_header_t));
-  
-  DUMP_HEX("header", buf, sizeof(enc28j60_rx_header_t));
-}
-
-void spi_dma_isr_read(uint8_t *addr, uint8_t *data, uint32_t size)
-{
-  int err = 1;
-
-  nrc_usr_print("[%s]\n",__func__);
-  
-  init_dma_desc(true, (uint32_t) addr, size);
-  nrc_dma_desc_set_inttc(&tx_desc, false);
-  init_dma_desc(false, (uint32_t) data, size);
-
-  err =  nrc_dma_start(DMA_RX_CHANNEL, &rx_desc);
-  if (err) {
-    nrc_usr_print("[%s] nrc_dma_start() failed with err %d.\n",__func__, err);
-    return;
-  }
-
-  spi_dma_start_xfer(&gemac->spi_hdl);
-  err =  nrc_dma_start(DMA_TX_CHANNEL, &tx_desc);
-  if (err) {
-    nrc_usr_print("[%s] nrc_dma_start() failed with err %d.\n",__func__, err);
-    return;
-  }
-  nrc_ssp_dma(gemac->spi_hdl.controller, SSP_DMA_TX | SSP_DMA_RX, true);
-  // nrc_dma_stop(DMA_TX_CHANNEL);
-  // nrc_dma_stop(DMA_RX_CHANNEL);
-  // nrc_ssp_dma(gemac->spi_hdl.controller, SSP_DMA_TX | SSP_DMA_RX, false);
-  // spi_dma_stop_xfer(&gemac->spi_hdl);
-}
-
-void isr_process_header(void)
-{
-  enc28j60_rx_header_t* hdr;
-  rx_node_t *node = dma_find_free_node();
-  uint8_t cmd = ENC28J60_READ_BUF_MEM;
-  uint16_t next_packet_addr;
-
-  nrc_usr_print("[%s]\n",__func__);
-  
-  if(dma_state != DMA_STATE_IDLE){
-    nrc_usr_print("[%s] dma_state not idle, returning\n",__func__);
-    defer_to_task();
-    return;
-  }
-
-  if(!node) {
-    nrc_usr_print("[%s] dma_find_free_node() failed\n",__func__);
-    event_flags |= EVT_RX_DISCARD_PKT;
-    dma_chain_depth = 0;
-    defer_to_task();
-    return;
-  }
-
-  if(!isr_grab_spi_from_task()){
-    nrc_usr_print("[%s] grab_spi_from_task() failed\n",__func__);
-    isr_return_spi_to_idle();
-    dma_chain_depth = 0;
-    event_flags |= EVT_RX_DISCARD_PKT;
-    defer_to_task();
-    return;
-  }
-
-  if (dma_chain_depth >= DMA_CHAIN_LIMIT) {
-    nrc_usr_print("[%s] dma_chain_depth %d failed\n",__func__, dma_chain_depth);
-    event_flags |= EVT_RX_DISCARD_PKT;
-    isr_return_spi_to_idle();
-    dma_chain_depth = 0;
-    defer_to_task();
-    return;
-  }
-  
-  dma_chain_depth++;
-
-  // read header into spi xfer buffer
-  enc28j60_isr_read_header(node->header);
-  hdr = (enc28j60_rx_header_t*)node->header;
-  DUMP_HEX("raw header", node->header, sizeof(node->header));
-  // next_packet_addr = (hdr->next_packet_high << 8) | hdr->next_packet_low;
-  node->packet_length = hdr->length_low + (hdr->length_high << 8);
-  next_packet_addr = enc28j60_rx_packet_start((hdr->next_packet_high << 8) | hdr->next_packet_low, ENC28J60_RSV_SIZE);
-  
-  nrc_usr_print("[%s] next_packet_addr 0x%X node->packet_length %d\n",__func__, next_packet_addr, node->packet_length);
-
-  // check validity
-  if (node->packet_length < MIN_ETH_FRAME_SIZE || node->packet_length > MAX_ETH_FRAME_SIZE) {
-    nrc_usr_print("[%s] invalid pkt, exiting\n", __func__);
-    event_flags |= EVT_RX_DISCARD_PKT;
-    isr_return_spi_to_idle();
-    dma_chain_depth = 0;
-    defer_to_task();
-    return;
-  }
-
-  current_dma_node = node;
-
-  nrc_usr_print("[%s] skipping spi_dma_isr_read()\n",__func__);
-  spi_dma_isr_read(&cmd, node->aligned_packet_buffer, node->packet_length + 1);
-
-  dma_state = DMA_STATE_PAYLOAD_IN_PROGRESS;
-  spi_owner = SPI_OWNER_NONE;
-}
-
-bool isr_packets_pending(void)
-{
-  uint8_t pktcnt = enc28j60_isr_read_reg(ENC28J60_EPKTCNT);
-  nrc_usr_print("[%s] pktcnt %d\n",__func__, pktcnt);
-  return (pktcnt > 0);
-}
-
-void enc28j60_dma_tx_complete_isr() 
-{
-  nrc_usr_print("[%s]\n",__func__);
-  event_flags = EVT_TX_DONE;
-}
-
-// finish packet processing, check for more packets, read header, DMA read packet
-void enc28j60_dma_rx_complete_isr() 
-{
-  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-
-  nrc_usr_print("[%s]\n",__func__);
-
-  if (current_dma_node) {
-    // Mark current node ready, decrement packet counter
-    current_dma_node->state = NODE_PACKET_READY;
-    xQueueSendFromISR(rx_ready_queue, &current_dma_node, &xHigherPriorityTaskWoken);
-    enc28j60_isr_set_bit(ENC28J60_ECON2, ECON2_PKTDEC);
-    current_dma_node = NULL;
-  }
-
-   if (!isr_grab_spi_from_task()) {
-        defer_to_task();
-        return;
-  }
-  
-  if(isr_packets_pending()) {
-    isr_process_header();
-  }
-  else
-      dma_state = DMA_STATE_IDLE;
-
-  defer_to_task();
-
-  event_flags = EVT_RX_PAYLOAD_DONE;
-}
-
-#endif /* #ifdef ETHERNET_SPI_DMA_CHAINED */
+#endif
 
 // Called from ISR (RX/TX DMA completion)
 static void dma_done_isr(dma_dir_t dir)
 {
-    BaseType_t high_task_wakeup = pdFALSE;
+    BaseType_t higher_priority_task_woken = pdFALSE;
+    
+#if defined(ETHERNET_SPI_DMA) && defined(SPI_DMA_CHAINED)
 
-#ifdef ETHERNET_SPI_DMA_CHAINED
-    E(TT_NET, "[%s] %s\n", __func__);
-         
-    if (dir == DMA_DIR_RX || dir == DMA_DIR_TX) {
-      	nrc_dma_stop(DMA_TX_CHANNEL);
-	nrc_dma_stop(DMA_RX_CHANNEL);
-	nrc_ssp_dma(gemac->spi_hdl.controller, SSP_DMA_TX | SSP_DMA_RX, false);
-	spi_dma_stop_xfer(&gemac->spi_hdl);
+    if (current_dma_node == NULL || current_dma_node->state != RX_NODE_DMA_IN_PROGRESS) {
+        // Invalid state, reset RX logic
+        enc28j60_reset_rx_logic();
+        return;
     }
 
-    // DMA is now idle
-    spi_dma_busy = false;
+    // Extract packet length from header (first 2 bytes after status bytes)
+    uint16_t rx_packet_length = current_dma_node->header[2] | (current_dma_node->header[3] << 8);
+    current_dma_node->packet_length = rx_packet_length;
 
-    E(TT_NET, "[%s] spi_dma_busy == %s dir == %s event_flags 0x%X\n", __func__, (spi_dma_busy == true) ? "true" : "false", (dir == DMA_DIR_TX) ? "TX" : "RX", event_flags);
-
-    if (dir == DMA_DIR_TX) {
-        enc28j60_dma_tx_complete_isr();
-    } 
-    else if (dir == DMA_DIR_RX) {
-        enc28j60_dma_rx_complete_isr();
+    // Validate packet length (standard Ethernet frame min and max lengths)
+    if (rx_packet_length < 60 || rx_packet_length > 1518) {
+        current_dma_node->state = RX_NODE_IDLE;
+        enc28j60_advance_rx_read_pointer(rx_packet_length);
+    } else {
+        current_dma_node->state = RX_NODE_READY_FOR_LWIP;
+        // Signal LwIP task that packet is ready
+        xSemaphoreGiveFromISR(rx_packet_ready_semaphore, &higher_priority_task_woken);
     }
-#endif /* ETHERNET_SPI_DMA_CHAINED */
+
+    // Immediately start DMA for next packet if available
+    if (enc28j60_has_pending_packet() && start_next_dma_transfer()) {
+        // next packet DMA initiated successfully
+    } else {
+        current_dma_node = NULL; // No packets pending or error
+    }
+#endif
+    portYIELD_FROM_ISR(higher_priority_task_woken);
 }
 
 ATTR_NC __attribute__((optimize("O3"))) static void enc28j60_spi_rx_dma_isr (int channel)
@@ -904,15 +567,9 @@ ATTR_NC __attribute__((optimize("O3"))) void enc28j60_spi_dma_read(uint8_t *addr
 {
 	int err = 1;
 
-        // nrc_usr_print("[%s]\n",__func__);
-        // nrc_usr_print("[%s] TX prepare_dma_desc.\n",__func__);
 	init_dma_desc(true, (uint32_t) addr, size);
-	/* Disable TX interrupt while reading data from SPI */
 	nrc_dma_desc_set_inttc(&tx_desc, false);
-	//	nrc_usr_print("[%s] RX prepare_dma_desc.\n",__func__);
 	init_dma_desc(false, (uint32_t) data, size);
-
-	/* prepare DMA RX channel to start receiving data */
 	err =  nrc_dma_start(DMA_RX_CHANNEL, &rx_desc);
 	if (err) {
 		nrc_usr_print("[%s] nrc_dma_start() failed with err %d.\n",__func__, err);
@@ -939,8 +596,6 @@ ATTR_NC __attribute__((optimize("O3"))) void enc28j60_spi_dma_write(uint8_t *dat
 {
 	int err = 1;
 
-        // nrc_usr_print("[%s]\n",__func__);
-	//	nrc_usr_print("[%s] TX prepare_dma_desc.\n",__func__);
 	init_dma_desc(true, (uint32_t) data, size);
 
 	spi_dma_start_xfer(&gemac->spi_hdl);
@@ -951,11 +606,9 @@ ATTR_NC __attribute__((optimize("O3"))) void enc28j60_spi_dma_write(uint8_t *dat
 	}
 
 	nrc_ssp_dma(gemac->spi_hdl.controller, SSP_DMA_TX, true);
-
 	xSemaphoreTake(tx_sem, portMAX_DELAY);
 	nrc_dma_stop(DMA_TX_CHANNEL);
 	nrc_ssp_dma(gemac->spi_hdl.controller, SSP_DMA_TX, false);
-
 	spi_dma_stop_xfer(&gemac->spi_hdl);
 }
 #endif /* #ifdef ETHERNET_SPI_DMA */
@@ -975,14 +628,15 @@ spi_read_buf(spi_device_t* spi, int len, u8* data)
     
   memset(spi_transfer_buf, 0, SPI_TRANSFER_BUF_LEN);
 
-  enc28j60_spi_lock(gemac);
 #ifdef ETHERNET_SPI_DMA
   // DMA is only for large transfers
   // if(len > 8) {
     // Use DMA to send RBM command and read len+1 bytes (includes dummy)
+    enc28j60_spi_lock(gemac);
     enc28j60_spi_dma_read(&cmd, spi_transfer_buf, len + 1);
     // The first byte in spi_transfer_buf is dummy (from sending cmd), actual data starts at index 1
     memcpy(data, &spi_transfer_buf[1], len);
+    enc28j60_spi_unlock(gemac);
   // } else {
   //   E(TT_NET, "using slow read for %d bytes instead of DMA\n", len);
   //   nrc_spi_read_values(spi, cmd, spi_transfer_buf, len);
@@ -990,6 +644,7 @@ spi_read_buf(spi_device_t* spi, int len, u8* data)
   // }
 #else
     // Fallback: byte-by-byte SPI transfer (mitigates timing issues if DMA is unavailable)
+    enc28j60_spi_lock(gemac);
     nrc_spi_start_xfer(spi);
     spi_transfer_buf[0] = cmd;
     // clock out one dummy + len bytes by transferring len+1 bytes total
@@ -1002,8 +657,8 @@ spi_read_buf(spi_device_t* spi, int len, u8* data)
     }
     nrc_spi_stop_xfer(spi);
     memcpy(data, &spi_transfer_buf[1], len);
-#endif
     enc28j60_spi_unlock(gemac);
+#endif
     return ret;
 }
 
@@ -1015,9 +670,10 @@ spi_write_buf(spi_device_t* spi, int len, const u8* data)
   if (len > SPI_TRANSFER_BUF_LEN - 1 || len <= 0) {
     ret = NRC_FAIL;
   }
-    spi_transfer_buf[0] = ENC28J60_WRITE_BUF_MEM;  // 0x7A command for write buffer
-    memcpy(&spi_transfer_buf[1], data, len);
-    enc28j60_spi_lock(gemac);
+  
+  enc28j60_spi_lock(gemac);
+  spi_transfer_buf[0] = ENC28J60_WRITE_BUF_MEM;  // 0x7A command for write buffer
+  memcpy(&spi_transfer_buf[1], data, len);
 #ifdef ETHERNET_SPI_DMA
     // if(len > 8) {
     // Use DMA to send command + data in one transfer
@@ -1029,7 +685,6 @@ spi_write_buf(spi_device_t* spi, int len, const u8* data)
     // Fallback to blocking SPI transfer if DMA is disabled or fails
     ret = spi_write(spi, spi_transfer_buf, len + 1);
 #endif
-
     enc28j60_spi_unlock(gemac);
     return ret;
 }
@@ -1057,31 +712,39 @@ spi_device_transmit(spi_device_t spi_hdl,
       // E(TT_NET, "[%s] case ENC28J60_SPI_CMD_RCR\n", __func__);
       
       enc28j60_spi_lock(gemac);
-      
       nrc_spi_writebyte_value(&spi_hdl, (trans->addr & ADDR_MASK) | ENC28J60_READ_CTRL_REG, 0);
-
+      enc28j60_spi_unlock(gemac);
+      
       if (trans->length / 8 == sizeof(uint8_t)) {
+        enc28j60_spi_lock(gemac);
         if (nrc_spi_readbyte_value(&spi_hdl,
                                    (trans->addr & ADDR_MASK) |
                                      ENC28J60_READ_CTRL_REG,
                                    &trans->rx_data[0]) == NRC_SUCCESS) {
           retval = NRC_SUCCESS;
         }
+         enc28j60_spi_unlock(gemac);
       } else if (trans->length / 8 == 2 * sizeof(uint8_t)) {
 
+        enc28j60_spi_lock(gemac);
         if (nrc_spi_readbyte_value(&spi_hdl,
                                    (trans->addr & ADDR_MASK) |
                                      ENC28J60_READ_CTRL_REG,
                                    &trans->rx_data[0]) == NRC_SUCCESS) {
           retval = NRC_SUCCESS;
         }
+        enc28j60_spi_unlock(gemac);
+        
+        enc28j60_spi_lock(gemac);
         if (nrc_spi_readbyte_value(&spi_hdl,
                                    (trans->addr & ADDR_MASK) |
                                      ENC28J60_READ_CTRL_REG,
                                    &trans->rx_data[1]) == NRC_SUCCESS) {
           retval = NRC_SUCCESS;
         }
+        enc28j60_spi_unlock(gemac);
       } else if (trans->length / 8 > 2 * sizeof(uint8_t)) {
+        enc28j60_spi_lock(gemac);
         if (nrc_spi_read_values(&spi_hdl,
                                 (trans->addr & ADDR_MASK) |
                                   ENC28J60_READ_CTRL_REG,
@@ -1089,8 +752,9 @@ spi_device_transmit(spi_device_t spi_hdl,
                                 trans->length / 8) == NRC_SUCCESS) {
           retval = NRC_SUCCESS;
         }
+        enc28j60_spi_unlock(gemac);
       }
-      enc28j60_spi_unlock(gemac);
+
       break;
     case ENC28J60_SPI_CMD_BFS:
       // E(TT_NET, "[%s] case ENC28J60_SPI_CMD_BFS\n", __func__);
@@ -1702,7 +1366,26 @@ emac_enc28j60_start(esp_eth_mac_t* mac)
   MAC_CHECK(enc28j60_register_write(emac, ENC28J60_ERDPTL, 0x00) == NRC_SUCCESS, "write ERDPTL failed", out, NRC_FAIL);
   MAC_CHECK(enc28j60_register_write(emac, ENC28J60_ERDPTH, 0x00) == NRC_SUCCESS, "write ERDPTH failed", out, NRC_FAIL);
   delay_us(100);
+  
+#if defined(ETHERNET_SPI_DMA) && defined(SPI_DMA_CHAIN)
+  dma_aligned_pbuf_pool_init();
 
+  for (int i = 0; i < RX_NODE_COUNT; i++) 
+  {
+    rx_nodes[i].state = NODE_FREE;
+    rx_nodes[i].aligned_packet_buffer = NULL;
+    rx_nodes[i].packet_length = 0;
+  }
+
+  // Schedule the first DMA
+  current_dma_node = &rx_nodes[0];
+  current_dma_node->aligned_packet_buffer = MEM_MALLOC(PBUF_POOL_BUFSIZE);
+  current_dma_node->state = NODE_DMA_BUSY;
+
+  current_dma_node->dma_dir = DMA_DIR_RX;
+  enc28j60_schedule_dma(emac, current_dma_node->aligned_packet_buffer, PBUF_POOL_BUFSIZE);
+#endif
+  
 out:
   return ret;
 }
@@ -1720,6 +1403,18 @@ emac_enc28j60_stop(esp_eth_mac_t* mac)
   MAC_CHECK(enc28j60_do_bitwise_clr(emac, ENC28J60_EIE, 0xFF) == NRC_SUCCESS, "clear EIE failed", out, NRC_FAIL);
   /* disable rx */
   MAC_CHECK(enc28j60_do_bitwise_clr(emac, ENC28J60_ECON1, ECON1_RXEN) == NRC_SUCCESS, "clear ECON1.RXEN failed", out, NRC_FAIL);
+#if defined(ETHERNET_SPI_DMA) && defined(SPI_DMA_CHAINED)
+  dma_aligned_pbuf_pool_deinit();
+
+  for (int i = 0; i < RX_NODE_COUNT; i++) 
+  {
+    if (rx_nodes[i].aligned_packet_buffer) {
+      MEM_FREE(rx_nodes[i].aligned_packet_buffer);
+      rx_nodes[i].aligned_packet_buffer = NULL;
+    }
+    rx_nodes[i].state = NODE_FREE;
+  }
+#endif
 out:
   return ret;
 }
@@ -1781,34 +1476,6 @@ static nrc_err_t enc28j60_configure_registers(emac_enc28j60_t *emac)
 
 out:
     return ret;
-}
-
-static void enc28j60_reset_tx(emac_enc28j60_t *emac)
-{
-    static int no_resets = 0;
-
-    E(TT_NET, "[%s]\n", __func__);
-
-    no_resets++;
-    
-    if(no_resets > 3) {
-      E(TT_NET, "[%s] no_resets  %d, restart\n", __func__, no_resets);
-      nrc_sw_reset();
-    }
-    
-    enc28j60_do_bitwise_clr(emac, ENC28J60_ECON1, ECON1_TXRTS);        
-    enc28j60_do_bitwise_set(emac, ENC28J60_ECON1, ECON1_TXRST);    // set transmit logic reset
-    delay_us(10);
-    enc28j60_do_bitwise_clr(emac, ENC28J60_EIR, ECON1_TXRST);       // clear transmit error flag
-    enc28j60_do_bitwise_clr(emac, ENC28J60_EIR,  EIR_TXERIF | EIR_TXIF);  // clear transmit error flags
-    enc28j60_do_bitwise_clr(emac, ENC28J60_ESTAT, ESTAT_TXABRT | ESTAT_LATECOL);
-    enc28j60_do_bitwise_clr(emac, ENC28J60_EIE, EIE_TXIE);         // clear transmit interrupt enable
-    enc28j60_do_bitwise_clr(emac, ENC28J60_EIE, EIE_TXERIE);         // clear transmit interrupt flag
-    enc28j60_do_bitwise_set(emac, ENC28J60_EIE, EIE_PKTIE | EIE_INTIE | EIE_TXERIE);
-    enc28j60_do_bitwise_set(emac, ENC28J60_ECON1, ECON1_TXRTS);
-    delay_us(100);
-    enc28j60_do_bitwise_clr(emac, ENC28J60_EIR, EIR_TXERIF);  // ensure no lingering error
-    enc28j60_do_bitwise_set(emac, ENC28J60_EIE, EIE_TXIE | EIE_INTIE);
 }
 
 static nrc_err_t enc28j60_clear_buferr(emac_enc28j60_t *emac) 
@@ -1882,6 +1549,35 @@ static nrc_err_t enc28j60_clear_buferr(emac_enc28j60_t *emac)
     return NRC_SUCCESS;
 }
 
+static void enc28j60_reset_tx(emac_enc28j60_t *emac)
+{
+    static int no_resets = 0;
+
+    E(TT_NET, "[%s]\n", __func__);
+
+    no_resets++;
+    
+    if(no_resets > 3) {
+      E(TT_NET, "[%s] no_resets  %d, restart\n", __func__, no_resets);
+      enc28j60_clear_buferr(emac);
+      no_resets = 0;
+    }
+    
+    enc28j60_do_bitwise_clr(emac, ENC28J60_ECON1, ECON1_TXRTS);        
+    enc28j60_do_bitwise_set(emac, ENC28J60_ECON1, ECON1_TXRST);    // set transmit logic reset
+    delay_us(10);
+    enc28j60_do_bitwise_clr(emac, ENC28J60_EIR, ECON1_TXRST);       // clear transmit error flag
+    enc28j60_do_bitwise_clr(emac, ENC28J60_EIR,  EIR_TXERIF | EIR_TXIF);  // clear transmit error flags
+    enc28j60_do_bitwise_clr(emac, ENC28J60_ESTAT, ESTAT_TXABRT | ESTAT_LATECOL);
+    enc28j60_do_bitwise_clr(emac, ENC28J60_EIE, EIE_TXIE);         // clear transmit interrupt enable
+    enc28j60_do_bitwise_clr(emac, ENC28J60_EIE, EIE_TXERIE);         // clear transmit interrupt flag
+    enc28j60_do_bitwise_set(emac, ENC28J60_EIE, EIE_PKTIE | EIE_INTIE | EIE_TXERIE);
+    enc28j60_do_bitwise_set(emac, ENC28J60_ECON1, ECON1_TXRTS);
+    delay_us(100);
+    enc28j60_do_bitwise_clr(emac, ENC28J60_EIR, EIR_TXERIF);  // ensure no lingering error
+    enc28j60_do_bitwise_set(emac, ENC28J60_EIE, EIE_TXIE | EIE_INTIE);
+}
+
 static void enc28j60_clear_single_pkt(emac_enc28j60_t *emac, enc28j60_rx_header_t *header) 
 {
     uint8_t pktcnt, estat;
@@ -1900,45 +1596,38 @@ static void enc28j60_clear_single_pkt(emac_enc28j60_t *emac, enc28j60_rx_header_
 
     E(TT_NET, "[%s] pktcnt %d\n", __func__, pktcnt);
 
-      // Temporarily reset RX logic
-      // enc28j60_do_bitwise_set(emac, ENC28J60_ECON1, ECON1_RXRST);
-      // delay_us(100);
-      // enc28j60_do_bitwise_clr(emac, ENC28J60_ECON1, ECON1_RXRST);
-      // enc28j60_do_bitwise_clr(emac, ENC28J60_EIR, EIR_RXERIF);
-      // delay_us(100);
+    // Validate the next_packet_ptr from the header
+    uint16_t next_packet_addr = (header->next_packet_high << 8) | header->next_packet_low;
+    bool valid_ptr = (next_packet_addr >= ENC28J60_BUF_RX_START &&
+                      next_packet_addr <= ENC28J60_BUF_RX_END &&
+                     (next_packet_addr & 0x0001));
 
-      // Validate the next_packet_ptr from the header
-      uint16_t next_packet_addr = (header->next_packet_high << 8) | header->next_packet_low;
-      bool valid_ptr = (next_packet_addr >= ENC28J60_BUF_RX_START &&
-                        next_packet_addr <= ENC28J60_BUF_RX_END &&
-                       (next_packet_addr & 0x0001));
+    if (!valid_ptr) {
+      // If the pointer is out of range, fallback to full buffer reset for safety
+      E(TT_NET, "[%s] Invalid next packet pointer 0x%04X – resetting RX buffer\n", __func__, next_packet_addr);
+      enc28j60_clear_buferr(emac);
+      return;
+    }
 
-      if (!valid_ptr) {
-        // If the pointer is out of range, fallback to full buffer reset for safety
-        E(TT_NET, "[%s] Invalid next packet pointer 0x%04X – resetting RX buffer\n", __func__, next_packet_addr);
-        enc28j60_clear_buferr(emac);  // perform full RX FIFO reset (see below)
-        return;
-      }
-    
-      // Set ERXRDPT safely (must be odd address)
-      uint16_t erxrdpt = enc28j60_next_ptr_align_odd(next_packet_addr, ENC28J60_BUF_RX_START, ENC28J60_BUF_RX_END);
-      enc28j60_register_write(emac, ENC28J60_ERXRDPTL, erxrdpt & 0xFF);
-      enc28j60_register_write(emac, ENC28J60_ERXRDPTH, (erxrdpt >> 8) & 0xFF);
+    // Set ERXRDPT safely (must be odd address)
+    uint16_t erxrdpt = enc28j60_next_ptr_align_odd(next_packet_addr, ENC28J60_BUF_RX_START, ENC28J60_BUF_RX_END);
+    enc28j60_register_write(emac, ENC28J60_ERXRDPTL, erxrdpt & 0xFF);
+    enc28j60_register_write(emac, ENC28J60_ERXRDPTH, (erxrdpt >> 8) & 0xFF);
 
-      emac->next_packet_ptr = next_packet_addr;
+    emac->next_packet_ptr = next_packet_addr;
 
-      // Flush one corrupted packet
-      if(pktcnt > 0)
-        enc28j60_do_bitwise_set(emac, ENC28J60_ECON2, ECON2_PKTDEC);
+    // Flush one corrupted packet
+    if(pktcnt > 0)
+      enc28j60_do_bitwise_set(emac, ENC28J60_ECON2, ECON2_PKTDEC);
 
-      enc28j60_register_read(emac, ENC28J60_EPKTCNT, &pktcnt);
+    enc28j60_register_read(emac, ENC28J60_EPKTCNT, &pktcnt);
 
-      E(TT_NET, "[%s] pktcnt %d after flush\n", __func__, pktcnt);
+    E(TT_NET, "[%s] pktcnt %d after flush\n", __func__, pktcnt);
 
-      // Re-enable RX logic
-      enc28j60_do_bitwise_clr(emac, ENC28J60_EIR, EIR_RXERIF | EIR_PKTIF);
-      enc28j60_do_bitwise_set(emac, ENC28J60_ECON1, ECON1_RXEN);
-      delay_us(50);
+    // Re-enable RX logic
+    enc28j60_do_bitwise_clr(emac, ENC28J60_EIR, EIR_RXERIF | EIR_PKTIF);
+    enc28j60_do_bitwise_set(emac, ENC28J60_ECON1, ECON1_RXEN);
+    delay_us(50);
 }
 
 static inline nrc_err_t
@@ -1948,149 +1637,20 @@ emac_enc28j60_get_tsv(emac_enc28j60_t* emac, enc28j60_tsv_t* tsv)
 }
 
 #ifdef ENABLE_ETHERNET_INTERRUPT
-#ifndef ETHERNET_SPI_DMA_CHAINED
 ATTR_NC __attribute__((optimize("O3"))) static void enc28j60_isr_handler(void *arg)
 {
     emac_enc28j60_t *emac = (emac_enc28j60_t *)arg;
     BaseType_t high_task_wakeup = pdFALSE;
 
-    // E(TT_NET, "[%s]\n", __func__);
-
     /* notify enc28j60 task */
     vTaskNotifyGiveFromISR(emac->rx_task_hdl, &high_task_wakeup);
+    
     if (high_task_wakeup != pdFALSE) {
         portYIELD_FROM_ISR(high_task_wakeup);
     }
 }
-#else /* ETHERNET_SPI_DMA_CHAINED */
-ATTR_NC __attribute__((optimize("O3"))) static void enc28j60_isr_handler(void *arg)
-{
-  emac_enc28j60_t *emac = (emac_enc28j60_t *)arg;
-  BaseType_t high_task_wakeup = pdFALSE;
-
-  E(TT_NET, "[%s] ETHERNET_SPI_DMA_CHAINED\n", __func__);
-    
-  // check if there are packets to read
-  // read header, check validity, if valid start DMA packet read
-  // packet read will finish in DMA done ISR
-  if(isr_packets_pending()) {
-    dma_chain_depth = 0;
-    isr_process_header();
-  }
-
-  defer_to_task();
-}
-#endif /* ETHERNET_SPI_DMA_CHAINED */
 #endif /* ENABLE_ETHERNET_INTERRUPT */
 
-#ifdef ETHERNET_SPI_DMA_CHAINED
-static void emac_enc28j60_task(void *arg)
-{
-  emac_enc28j60_t* emac = (emac_enc28j60_t*)arg;
-  int int_bit = 0;
-  uint8_t flags = 0;
-  rx_node_t *node;
-  uint8_t pktcnt = 0;
-
-  while (1)
-  {
-    // E(TT_NET, "[%s] loop top\n", __func__);
-
-    MAC_CHECK_NO_RET(emac->run_task == true, "exit task", out);
-
-    // block until some task notifies me
-    if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY) == 0) { // ...and no interrupt asserted
-      // nrc_gpio_inputb(emac->int_gpio_num, &int_bit);
-      // if (int_bit == 1) {
-      //   E(TT_NET, "[%s] no interrupt from gpio\n", __func__);
-      delay_us(100);
-      continue;                          // -> just continue to check again
-      // }
-    }
-
-#ifdef ENABLE_ETHERNET_INTERRUPT
-    if (emac->interrupt_vector != -1) {
-        system_irq_unmask(emac->interrupt_vector);
-    }
-#endif
-
-    flags = event_flags;
-    
-    if (flags & EVT_TX_ERR) {
-      E(TT_NET, "[%s] EVT_TX_ERR\n", __func__);
-      enc28j60_reset_tx(emac);
-      flags &= ~EVT_TX_ERR;
-    }
-    
-    if (flags & EVT_RX_ERR) {
-      E(TT_NET, "[%s] EVT_RX_ERR\n", __func__);
-      enc28j60_clear_buferr(emac);
-      flags &= ~EVT_RX_ERR;
-    }
-
-    if (flags & EVT_RX_DISCARD_PKT)
-    {
-      // NOTE: check emac->next_packet_ptr for sanity before passing
-      E(TT_NET, "[%s] EVT_RX_DISCARD_PKT\n", __func__);
-      // enc28j60_clear_single_pkt(emac, (enc28j60_rx_header_t *)emac->next_packet_ptr);
-      flags &= ~EVT_RX_DISCARD_PKT;
-    }
-
-    enc28j60_register_read(emac, ENC28J60_EPKTCNT, &pktcnt);
-    E(TT_NET, "[%s] pktcnt %d\n", __func__, pktcnt);
-    
-    while (xQueueReceive(rx_ready_queue, &node, 0) == pdPASS)
-    {
-      int retry_alloc = MAX_RETRY_COUNT;
-      uint8_t *buffer = NULL;
-
-      E(TT_NET, "[%s] process queue\n", __func__);
-            
-      // log state if not correct
-      if (node->state != NODE_PACKET_READY)
-        E(TT_NET, "[%s] node->state != NODE_PACKET_READY, state 0x%X\n", __func__, node->state);
-        
-      // sanity check, recycle node on error
-      if (node->packet_length < MIN_ETH_FRAME_SIZE || node->packet_length > MAX_ETH_FRAME_SIZE) {
-        E(TT_NET, "[%s] bogus node, node->packet_length %d\n", __func__, node->packet_length);
-        if(node->aligned_packet_buffer) {
-          MEM_FREE(node->aligned_packet_buffer);
-          node->aligned_packet_buffer = MEM_MALLOC(MAX_ETH_FRAME_SIZE);
-        }
-        node->packet_length = 0;
-        node->state = NODE_FREE;
-        continue;
-      }
-
-        // undo aligned offset for ethernet buffer
-        buffer = unalign_aligned_buffer(node->aligned_packet_buffer);
-        if(!buffer) {
-          E(TT_NET, "[%s] system alert, possible heap exhaustion\n", __func__);
-          continue;
-        }
-        memmove(buffer, node->aligned_packet_buffer, node->packet_length);
-
-        E(TT_NET, "[%s] pass node to ethernet handler\n", __func__);
-        
-        // pass to ethernet handler
-        emac->eth->stack_input(emac->eth, buffer, node->packet_length);
-
-        // recycle node
-        node->aligned_packet_buffer = aligned_malloc(MAX_ETH_FRAME_SIZE, 4);
-        node->packet_length = 0;
-        node->state = NODE_FREE;
-    }
-    
-    // E(TT_NET, "[%s] loop bottom\n", __func__);
-  }
-
-out:
-
-  E(TT_NET, "[%s] exiting\n", __func__);
-
-  vTaskDelete(NULL);
-}
-#else /* ! ETHERNET_SPI_DMA_CHAINED */
 /**
  * @brief Main ENC28J60 Task. Mainly used for Rx processing. However, it also
  * handles other interrupts.
@@ -2141,12 +1701,6 @@ emac_enc28j60_task(void* arg)
     MAC_CHECK_NO_RET(enc28j60_do_register_read(emac, true, ENC28J60_EIR, &status) == NRC_SUCCESS, "read EIR failed", loop_end);
     MAC_CHECK_NO_RET(enc28j60_do_register_read(emac, true, ENC28J60_EIE, &mask) == NRC_SUCCESS, "read EIE failed", loop_end);
     status &= mask;
-    
-    // E(TT_NET, "[%s] status = 0x%x, mask = 0x%x\n", __func__, status, mask);
-
-    // if (status & EIR_RXERIF) {
-    //   enc28j60_clear_buferr(emac);  // now this will execute on RX overflow
-    // }
 
 #ifdef ENABLE_ETHERNET_INTERRUPT
     enc28j60_do_bitwise_clr(emac, ENC28J60_EIR, 0xFF); 
@@ -2214,7 +1768,6 @@ emac_enc28j60_task(void* arg)
     
     // transmit error
     if (status & EIR_TXERIF) {
-      // E(TT_NET, "[%s] status & EIR_TXERIF %d\n", __func__, (status & EIR_TXERIF) >> 8);
       // Errata #12/#13 workaround - reset Tx state machine
       enc28j60_reset_tx(emac);
             
@@ -2240,21 +1793,12 @@ emac_enc28j60_task(void* arg)
                     // global interrupt at this point
         }
       }
-      // enc28j60_clear_buferr(emac);
     }
-
-    // check for RX errors
-    // if(status & EIR_RXERIF) {
-    //   enc28j60_clear_buferr(emac);
-    // }
 
   MAC_CHECK_NO_RET(emac->run_task == true, "exit task", out);
 
     // transmit ready
     if (status & EIR_TXIF) {
-      // uint32_t tx_done_ticks = xTaskGetTickCount();
-      // uint32_t tx_time_ms = (tx_done_ticks - emac->tx_start_ticks) * portTICK_PERIOD_MS;
-      // E(TT_NET, "TX completion latency: %u ms\n", tx_time_ms);
       MAC_CHECK_NO_RET(enc28j60_do_bitwise_clr(emac, ENC28J60_EIR, EIR_TXIF) == NRC_SUCCESS, "clear TXIF failed", loop_end);
       MAC_CHECK_NO_RET(enc28j60_do_bitwise_clr(emac, ENC28J60_EIE, EIE_TXIE) == NRC_SUCCESS, "clear TXIE failed", loop_end);
 
@@ -2275,7 +1819,6 @@ out:
 
   vTaskDelete(NULL);
 }
-#endif /* ! ETHERNET_SPI_DMA_CHAINED */
 
 ATTR_NC __attribute__((optimize("O3"))) static nrc_err_t
 emac_enc28j60_set_link(esp_eth_mac_t* mac, eth_link_t link)
@@ -2395,32 +1938,12 @@ out:
     return ret;  // indicate that a recovery happened (packet was not sent)
 }
 
-#ifdef ETHERNET_SPI_DMA_CHAINED
-ATTR_NC __attribute__((optimize("O3"))) static nrc_err_t
-emac_enc28j60_transmit(esp_eth_mac_t* mac, uint8_t* buf, uint32_t length)
-{
-  E(TT_NET, "[%s] ETHERNET_SPI_DMA_CHAINED\n", __func__);
-  event_flags = EVT_TX_START;
-  // enc28j60_schedule_dma_tx(buf, length);
-  
-  return NRC_SUCCESS;
-}
-#else /* ! ETHERNET_SPI_DMA_CHAINED */
 ATTR_NC __attribute__((optimize("O3"))) static nrc_err_t
 emac_enc28j60_transmit(esp_eth_mac_t* mac, uint8_t* buf, uint32_t length)
 {
     nrc_err_t ret = NRC_SUCCESS;
     emac_enc28j60_t *emac = __containerof(mac, emac_enc28j60_t, parent);
     uint8_t econ1 = 0;
-
-#ifdef ENABLE_ETHERNET_INTERRUPT
-    /* ENC28J60 may be a bottle neck in Eth communication. Hence we need to check if it is ready. */
-    // if (xSemaphoreTake(emac->tx_ready_sem, pdMS_TO_TICKS(ENC28J60_TX_READY_TIMEOUT_MS)) == pdFALSE) {
-    //     E(TT_NET, "tx_ready_sem expired\n");
-    // }
-#endif
-
-    // E(TT_NET, "[%s]\n", __func__);
 
     MAC_CHECK(wait_for_transmit_completion(emac) == NRC_SUCCESS, "transmission busy", out, NRC_FAIL);
 
@@ -2454,19 +1977,25 @@ emac_enc28j60_transmit(esp_eth_mac_t* mac, uint8_t* buf, uint32_t length)
 out:
     return ret;
 }
-#endif /* ! ETHERNET_SPI_DMA_CHAINED */
 
-
-#ifdef ETHERNET_SPI_DMA_CHAINED
-static nrc_err_t emac_enc28j60_receive(esp_eth_mac_t* mac, uint8_t* buf, uint32_t* length) 
-{
-  E(TT_NET, "[%s]\n", __func__);
-  return NRC_FAIL;
-}
-#else /* ! ETHERNET_SPI_DMA_CHAINED */
 ATTR_NC __attribute__((optimize("O3"))) static nrc_err_t
 emac_enc28j60_receive(esp_eth_mac_t* mac, uint8_t* buf, uint32_t* length)
 {
+#if defined(ETHERNET_SPI_DMA) && defined(SPI_DMA_CHAINED)
+    for (int i = 0; i < RX_NODE_COUNT; i++) 
+    {
+        rx_node_t *node = &rx_nodes[i];
+
+        if (node->state == NODE_PACKET_READY && node->aligned_packet_buffer) {
+          // send to LwIP
+          // MEM_FREE(node->aligned_packet_buffer);
+          // node->aligned_packet_buffer = NULL;
+          // node->state = NODE_FREE;
+        }
+    }
+
+    return NULL; // No packets available
+#else
     nrc_err_t ret = NRC_SUCCESS;
     emac_enc28j60_t *emac = __containerof(mac, emac_enc28j60_t, parent);
     static int error_recovery_count = 0;
@@ -2475,22 +2004,16 @@ emac_enc28j60_receive(esp_eth_mac_t* mac, uint8_t* buf, uint32_t* length)
     uint32_t next_packet_addr = 0;
     enc28j60_rx_header_t header;
 
-    // E(TT_NET, "[%s]\n", __func__);
-
     // read packet header
     MAC_CHECK(enc28j60_read_packet(emac, emac->next_packet_ptr, (uint8_t *)&header, sizeof(header)) == NRC_SUCCESS,
               "read header failed", out, NRC_FAIL);
 
-    // DUMP_HEX("RSV Header", (uint8_t*)&header, sizeof(header));
-    
     V(TT_NET, "[%s] header.next_packet_low = 0x%x\n", __func__, header.next_packet_low);
     V(TT_NET, "[%s] header.next_packet_high = 0x%x\n", __func__, header.next_packet_high);
     V(TT_NET, "[%s] header.length_low = 0x%x\n", __func__, header.length_low);
     V(TT_NET, "[%s] header.length_high = 0x%x\n", __func__, header.length_high);
     V(TT_NET, "[%s] header.status_low = 0x%x\n", __func__, header.status_low);
     V(TT_NET, "[%s] header.status_high = 0x%x\n", __func__, header.status_high);
-
-    // DUMP_HEX("received header", &header, sizeof(header));
 
     // get packets' length, address
     rx_len = header.length_low + (header.length_high << 8);
@@ -2530,8 +2053,8 @@ emac_enc28j60_receive(esp_eth_mac_t* mac, uint8_t* buf, uint32_t* length)
     emac->packets_remain = (pk_counter > 0);
 out:
     return ret;
+#endif
 }
-#endif /* ! ETHERNET_SPI_DMA_CHAINED */
 
 /**
  * @brief Get chip info
@@ -2563,7 +2086,8 @@ static void enc28j60_intr_handler(int vector)
     int input;
 
     if (nrc_gpio_inputb(gemac->int_gpio_num, &input) < 0) {
-        return;
+      E(TT_NET, "[%s] call enc28j60_isr_handler, input %d\n", __func__, input);
+      return;
     }
 
     if (!input) {
@@ -2609,16 +2133,14 @@ emac_enc28j60_init(esp_eth_mac_t* mac)
   
 #ifdef ENABLE_ETHERNET_INTERRUPT
   nrc_gpio_trigger_config(INT_VECTOR0, TRIGGER_LEVEL, TRIGGER_LOW, true);
+  #define ENC28_INT_PRIO   0x05 
+  system_irq_prio(INT_VECTOR0, ENC28_INT_PRIO);
+  
   if (nrc_gpio_register_interrupt_handler(INT_VECTOR0, emac->int_gpio_num, enc28j60_intr_handler) == NRC_SUCCESS) {
     V(TT_NET, "[%s] interrupt handler installed\n", __func__);
   }
   emac->interrupt_vector = INT_VECTOR0;
-  system_irq_prio(emac->interrupt_vector,  configMAX_SYSCALL_INTERRUPT_PRIORITY);
-  #define ENC28_INT_PRIO   0x08 
-  if (emac->interrupt_vector != -1) {
-    system_irq_prio(emac->interrupt_vector, ENC28_INT_PRIO);
-    // NVIC_ClearPendingIRQ((IRQn_Type)emac->interrupt_vector);
-  }
+
 #endif
 
   return NRC_SUCCESS;
@@ -2645,7 +2167,6 @@ emac_enc28j60_del(esp_eth_mac_t* mac)
 {
   emac_enc28j60_t* emac = __containerof(mac, emac_enc28j60_t, parent);
   vTaskDelete(emac->rx_task_hdl);
-  vSemaphoreDelete(emac->spi_lock);
   vSemaphoreDelete(emac->reg_trans_lock);
   vSemaphoreDelete(emac->tx_ready_sem);
   free(emac);
@@ -2661,10 +2182,6 @@ emac_enc28j60_del(esp_eth_mac_t* mac)
        vSemaphoreDelete(tx_sem);
 
       dma_aligned_pbuf_pool_deinit();
-#ifdef ETHERNET_SPI_DMA_CHAINED
-    // if(rx_ready_queue)
-      // xQueueDelete(rx_ready_queue);
-#endif /* ETHERNET_SPI_DMA_CHAINED */
 #endif /* ETHERNET_SPI_DMA */
 
   return NRC_SUCCESS;
@@ -2720,10 +2237,9 @@ esp_eth_mac_new_enc28j60(spi_device_t *enc28j60_spi,
   emac->mac_config = mac_config;
   emac->run_task = true;
   emac->tx_start_ticks = 0;
+  emac->spi_lock = 0;
   
   /* create mutex */
-  emac->spi_lock = xSemaphoreCreateMutex();
-  MAC_CHECK(emac->spi_lock, "create spi lock failed", err, NULL);
   emac->reg_trans_lock = xSemaphoreCreateMutex();
   MAC_CHECK(emac->reg_trans_lock, "create register transaction lock failed", err, NULL);
   emac->tx_ready_sem = xSemaphoreCreateBinary();
@@ -2736,11 +2252,6 @@ esp_eth_mac_new_enc28j60(spi_device_t *enc28j60_spi,
   tx_sem = xSemaphoreCreateBinary();
   MAC_CHECK(rx_sem, "create tx_sem semaphore failed", err, NULL);
   dma_aligned_pbuf_pool_init();
-#ifdef ETHERNET_SPI_DMA_CHAINED
-  rx_ready_queue = xQueueCreate(RX_NODE_COUNT, sizeof(rx_node_t *));
-  MAC_CHECK(rx_ready_queue, "create rx_ready_queue queue failed", err, NULL);
-  MAC_CHECK(dma_init_nodes() == NRC_SUCCESS,"dma_init_nodes() failed", err, NULL);
-#endif /* ETHERNET_SPI_DMA_CHAINED */
 #endif /* ETHERNET_SPI_DMA */
   /* create enc28j60 task */
   BaseType_t core_num = 0; // tskNO_AFFINITY;
@@ -2752,7 +2263,7 @@ esp_eth_mac_new_enc28j60(spi_device_t *enc28j60_spi,
                                      "enc28j60_tsk",
                                      mac_config->rx_task_stack_size,
                                      emac,
-                                     NRC_TASK_PRIORITY - 2,
+                                     NRC_TASK_PRIORITY - 1,
                                      &emac->rx_task_hdl);
   MAC_CHECK(xReturned == pdPASS, "create enc28j60 task failed", err, NULL);
 
@@ -2761,9 +2272,6 @@ err:
   if (emac) {
     if (emac->rx_task_hdl) {
       vTaskDelete(emac->rx_task_hdl);
-    }
-    if (emac->spi_lock) {
-      vSemaphoreDelete(emac->spi_lock);
     }
     if (emac->reg_trans_lock) {
       vSemaphoreDelete(emac->reg_trans_lock);
@@ -2776,10 +2284,6 @@ err:
        vSemaphoreDelete(rx_sem);
     if(tx_sem)
        vSemaphoreDelete(tx_sem);
-#ifdef ETHERNET_SPI_DMA_CHAINED
-    // if(rx_ready_queue)
-      // xQueueDelete(rx_ready_queue);
-#endif /* ETHERNET_SPI_DMA_CHAINED */
 #endif /* ETHERNET_SPI_DMA */
     MEM_FREE(emac);
   }
