@@ -323,7 +323,7 @@ ATTR_NC __attribute__((optimize("O3"))) static nrc_err_t eth_stack_input_handler
 		case ETHTYPE_IP:
 			V(TT_NET, "[%s] eth_copy_buffer_to_pbuf...\n", __func__);
 #ifdef NRC7394_DMA_MEMPOOL
-			if ((p = pbuf_from_payload(buffer)) == NULL) {
+			if ((p = pbuf_from_payload(buffer, length)) == NULL) {
 #else
 			if ((p = eth_copy_buffer_to_pbuf(buffer, length)) == NULL) {
 #endif

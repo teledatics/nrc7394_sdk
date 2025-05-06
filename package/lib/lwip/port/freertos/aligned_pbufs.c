@@ -21,9 +21,15 @@
 
 // #define DMA_ALIGNED_DEBUG 1
 #ifdef DMA_ALIGNED_DEBUG
+    static int total_buffers = 0;
+    static int total_in_use = 0;
     #define DBG_PRINT(fmt, ...) nrc_usr_print("[DMA_DBG] %s:%d: " fmt, __func__, __LINE__, ##__VA_ARGS__)
 #else
     #define DBG_PRINT(fmt, ...)
+#endif
+
+#ifndef delay_us
+    #define delay_us(x) vTaskDelay(pdMS_TO_TICKS(x) / 1000)
 #endif
 
 typedef struct {
@@ -41,15 +47,24 @@ static dma_aligned_pbuf_entry_t *payload_lookup_table[DMA_ALIGNED_PBUF_POOL_SIZE
 
 void *aligned_malloc(size_t size, size_t alignment)
 {
+    int retries = 15;
+    uintptr_t raw;
 	
-    DBG_PRINT("[%s] allocate %d bytes\n", __func__, size);
-    
+    DBG_PRINT("allocating %d bytes\n", size);
+
     if (alignment < sizeof(void*)) alignment = sizeof(void*);
-    uintptr_t raw = (uintptr_t)malloc(size + alignment - 1 + sizeof(void*));
-    if (!raw){
-	DBG_PRINT("[%s]malloc failure for %d bytes\n", __func__, size);
+    do {
+	raw = (uintptr_t)malloc(size + alignment - 1 + sizeof(void*));
+	if (!raw){
+		DBG_PRINT("malloc failure for %d bytes, retries %d\n", size, retries);
+	}
+	delay_us(10);
+    } while(!raw && --retries > 0);
+
+    if(!raw) {
 	return NULL;
     }
+
     uintptr_t aligned = (raw + sizeof(void*) + alignment - 1) & ~(alignment - 1);
     ((void**)aligned)[-1] = (void*)raw;
     return (void*)aligned;
@@ -70,7 +85,7 @@ inline void* unalign_aligned_buffer(uint8_t *aligned_buffer)
     return ((void**)aligned_buffer)[-1];
 }
 
-inline struct pbuf *pbuf_from_payload(void *payload)
+inline struct pbuf *pbuf_from_payload(void *payload, uint32_t len)
 {
     DBG_PRINT("[%s]\n", __func__);
 
@@ -78,8 +93,12 @@ inline struct pbuf *pbuf_from_payload(void *payload)
 
     for (int i = 0; i < DMA_ALIGNED_PBUF_POOL_SIZE; ++i) 
     {
-        if (payload_lookup_table[i] && payload_lookup_table[i]->payload == payload)
-	    return (struct pbuf *)&payload_lookup_table[i]->pbuf_cust;
+        if (payload_lookup_table[i] && payload_lookup_table[i]->payload == payload) {
+	    struct pbuf *p = (struct pbuf *)&payload_lookup_table[i]->pbuf_cust;
+	    if(len > 0)
+		p->len = p->tot_len = len;
+	    return p;
+	}
     }
 
     return NULL;
@@ -88,7 +107,7 @@ inline struct pbuf *pbuf_from_payload(void *payload)
 void dma_aligned_payload_free(void *payload) 
 {
     DBG_PRINT("[%s]\n", __func__);
-    struct pbuf *p = pbuf_from_payload(payload);
+    struct pbuf *p = pbuf_from_payload(payload, 0);
     if (p) {
         dma_aligned_pbuf_free(p);
     }
@@ -108,6 +127,9 @@ int dma_aligned_pbuf_pool_init(void)
         dma_aligned_pbuf_pool[i].payload = NULL;
         dma_aligned_pbuf_pool[i].in_use = 0;
         dma_aligned_entry_ring[i] = &dma_aligned_pbuf_pool[i];
+#ifdef DMA_ALIGNED_DEBUG
+	total_buffers++;
+#endif
     }
 
     dma_aligned_head  = 0;
@@ -156,7 +178,7 @@ struct pbuf *dma_aligned_pbuf_alloc(u16_t len)
     // Lazy-allocate payload buffer
     if (!entry->payload) {
         entry->payload = aligned_malloc(len, DMA_ALIGNMENT);
-	DBG_PRINT("[%s] allocated NEW payload buffer at index=%zu\n", __func__, index);
+	DBG_PRINT("allocated NEW payload buffer at index=%zu\n", index);
         if (!entry->payload) {
             E(TT_NET, "%s: payload alloc failed\n", __func__);
             // push back and return NULL
@@ -166,12 +188,12 @@ struct pbuf *dma_aligned_pbuf_alloc(u16_t len)
         }
     }
     else {
-        DBG_PRINT("[%s] REUSING payload buffer at index=%zu, payload=%p\n", __func__, index, entry->payload);
+        DBG_PRINT("REUSING payload buffer at index=%zu, payload=%p\n", index, entry->payload);
     }
     
 #ifdef DMA_ALIGNED_DEBUG
     if (entry->in_use) {
-        DBG_PRINT("%s: warning — reusing entry already marked in_use!\n", __func__);
+        DBG_PRINT("warning — reusing entry already marked in_use!\n");
     }
 #endif
 
@@ -181,7 +203,7 @@ struct pbuf *dma_aligned_pbuf_alloc(u16_t len)
 
 #ifdef DMA_ALIGNED_DEBUG
     if (((uintptr_t)entry->payload & (DMA_ALIGNMENT - 1)) != 0) {
-        DBG_PRINT("%s: payload buffer not aligned (ptr=%p)\n", __func__, entry->payload);
+        DBG_PRINT("payload buffer not aligned (ptr=%p)\n", entry->payload);
     }
 #endif
 
@@ -195,6 +217,10 @@ struct pbuf *dma_aligned_pbuf_alloc(u16_t len)
 
     // for O(1) payload->entry lookup
     payload_lookup_table[index] = entry;
+
+#ifdef DMA_ALIGNED_DEBUG
+	DBG_PRINT("total buffers %d total in use %d\n", total_buffers, ++total_in_use);
+#endif
 
     return p;
 }
@@ -223,14 +249,14 @@ void dma_aligned_pbuf_free(struct pbuf *p)
             payload_lookup_table[i] = NULL;
 #ifdef DMA_ALIGNED_DEBUG	    
 	    found = true;
-	    DBG_PRINT("cleared payload_lookup_table at index=%d\n", __func__, i);
+	    DBG_PRINT("cleared payload_lookup_table at index=%d\n", i);
 #endif
 	    break;
 	}
     }
 #ifdef DMA_ALIGNED_DEBUG
     if (!found) {
-        DBG_PRINT("WARNING: entry not found in payload_lookup_table\n", __func__);
+        DBG_PRINT("WARNING: entry not found in payload_lookup_table\n");
     }
 #endif
     // Reset fields (optional)
@@ -240,7 +266,7 @@ void dma_aligned_pbuf_free(struct pbuf *p)
     // Recycle entry
 #ifdef DMA_ALIGNED_DEBUG
     if (dma_aligned_count >= DMA_ALIGNED_PBUF_POOL_SIZE) {
-        E(TT_NET, "%s: error — ring buffer overflow\n", __func__);
+        E(TT_NET, "error — ring buffer overflow\n");
     }
 #endif
 
@@ -249,7 +275,8 @@ void dma_aligned_pbuf_free(struct pbuf *p)
     dma_aligned_tail = (dma_aligned_tail + 1) % DMA_ALIGNED_PBUF_POOL_SIZE;
     dma_aligned_count++;
     
-    DBG_PRINT("entry returned to ring at tail=%zu\n", __func__, dma_aligned_tail);
+    DBG_PRINT("entry returned to ring at tail=%zu\n", dma_aligned_tail);
+    DBG_PRINT("total buffers %d total in use %d\n", total_buffers, --total_in_use);
 }
 
 #endif /* NRC7394_DMA_MEMPOOL */

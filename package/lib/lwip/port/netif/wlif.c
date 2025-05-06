@@ -89,7 +89,7 @@ static err_t low_level_output( struct netif *netif, struct pbuf *p )
 
 	for( q = p; q != NULL; q = q->next ) {
 		frames[i] = q->payload;
-		frame_len[i] = q->len;
+		frame_len[i] = q->tot_len;
 		i++;
 	}
 	V(TT_NET, "[%s] netif->num = %d, output frames = %d, frame_len = %d...\n", __func__, netif->num, i, frame_len[0]);
@@ -128,13 +128,13 @@ void lwif_input_from_net80211_pbuf(struct pbuf* p)
 			V(TT_NET, "[%s] send packet to tcpip thread to process...\n", __func__);
 			if (netif->input(p, netif)!=ERR_OK) {
 				LWIP_DEBUGF(NETIF_DEBUG, ("ethernetif_input: IP input error\n"));
-				pbuf_free(p);
+				MEM_FREE(p);
 				p = NULL;
 			}
 			break;
 
 		default:
-			pbuf_free(p);
+			MEM_FREE(p);
 			p = NULL;
 			break;
 	}
@@ -238,14 +238,13 @@ void lwif_input(struct nrc_wpa_if* intf, void *buffer, int data_len)
 	struct etharp_hdr *arp_hdr;
 	struct ip_hdr *ip_hdr;
 
-	E(TT_NET, "[%s] input length = %d...\n", __func__, data_len);
+	// E(TT_NET, "[%s] input length = %d...\n", __func__, data_len);
 #ifdef NRC7394_DMA_MEMPOOL
 	/* zero-copy: grab a DMA-aligned pbuf directly */
-	p = dma_aligned_pbuf_alloc(len);
-	if (p) {
+	p = dma_aligned_pbuf_alloc(data_len);
 #else
 	p = pbuf_alloc( PBUF_RAW, len, PBUF_POOL );
-	
+#endif	
 	if( p != NULL )
 	{
 		for (q = p; q != NULL && remain > 0; q = q->next)
@@ -256,7 +255,6 @@ void lwif_input(struct nrc_wpa_if* intf, void *buffer, int data_len)
 			remain -= q->len;
 			offset += q->len;
 		}
-#endif
 		LINK_STATS_INC(link.recv);
 	}
 
@@ -365,7 +363,7 @@ void lwif_input(struct nrc_wpa_if* intf, void *buffer, int data_len)
 
 		default:
 pbuf_free:
-			pbuf_free(p);
+			MEM_FREE(p);
 			p = NULL;
 			break;
 	}

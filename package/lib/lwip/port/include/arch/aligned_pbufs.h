@@ -8,7 +8,7 @@ extern "C" {
 #endif
 
 #ifndef DMA_ALIGNED_PBUF_POOL_SIZE
-# define DMA_ALIGNED_PBUF_POOL_SIZE 25
+# define DMA_ALIGNED_PBUF_POOL_SIZE 30
 #endif
 
 #ifdef MEM_ALIGNMENT
@@ -31,14 +31,10 @@ void dma_aligned_free(void *ptr);
 struct pbuf *dma_aligned_pbuf_alloc(u16_t len);
 void dma_aligned_pbuf_free(struct pbuf *p);
 
-struct pbuf *pbuf_from_payload(void *payload);
+struct pbuf *pbuf_from_payload(void *payload, uint32_t len);
 
 int dma_aligned_pbuf_pool_init(void);
 void dma_aligned_pbuf_pool_deinit(void);
-
-#ifdef DMA_ALIGNED_DEBUG
-void dma_aligned_pbuf_print_stats(void);
-#endif
 	
 #ifdef NRC7394_DMA_MEMPOOL
 #define MEM_MALLOC(len)                                                      \
@@ -52,7 +48,7 @@ void dma_aligned_pbuf_print_stats(void);
 #define MEM_FREE(ptr)                                                       \
     do {                                                                     \
         if (ptr) {                                                           \
-            struct pbuf *__p = pbuf_from_payload((ptr));                     \
+            struct pbuf *__p = pbuf_from_payload((ptr), 0);                     \
             if (__p) {                                                       \
                 /* zero-copy path: will unref and free in pool */            \
                 dma_aligned_pbuf_free(__p);                               \

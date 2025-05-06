@@ -28,7 +28,6 @@
   } while (0)
 
 #ifdef NRC7394_DMA_MEMPOOL
-#define DMA_ALIGNED_PBUF_POOL_SIZE 30
 #include "arch/aligned_pbufs.h"
 // for custom pbufs code, see lwip/port/arch/aligned_pufs.c
 #endif
