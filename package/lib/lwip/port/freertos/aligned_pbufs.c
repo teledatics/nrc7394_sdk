@@ -45,7 +45,7 @@ static size_t dma_aligned_head = 0, dma_aligned_tail = 0, dma_aligned_count = 0;
 // === payload-> entry lookup table ===
 static dma_aligned_pbuf_entry_t *payload_lookup_table[DMA_ALIGNED_PBUF_POOL_SIZE];
 
-void *aligned_malloc(size_t size, size_t alignment)
+ATTR_NC __attribute__((optimize("O3"))) void *aligned_malloc(size_t size, size_t alignment)
 {
     int retries = 15;
     uintptr_t raw;
@@ -70,7 +70,7 @@ void *aligned_malloc(size_t size, size_t alignment)
     return (void*)aligned;
 }
 
-void aligned_free(void *ptr)
+ATTR_NC __attribute__((optimize("O3"))) void aligned_free(void *ptr)
 {
     DBG_PRINT("[%s]\n", __func__);
     if (!ptr) return;
@@ -79,13 +79,13 @@ void aligned_free(void *ptr)
     free((void *)raw);
 }
 
-inline void* unalign_aligned_buffer(uint8_t *aligned_buffer)
+ATTR_NC __attribute__((optimize("O3"))) inline void* unalign_aligned_buffer(uint8_t *aligned_buffer)
 {
     DBG_PRINT("[%s]\n", __func__);
     return ((void**)aligned_buffer)[-1];
 }
 
-inline struct pbuf *pbuf_from_payload(void *payload, uint32_t len)
+ATTR_NC __attribute__((optimize("O3"))) inline struct pbuf *pbuf_from_payload(void *payload, uint32_t len)
 {
     DBG_PRINT("[%s]\n", __func__);
 
@@ -104,7 +104,7 @@ inline struct pbuf *pbuf_from_payload(void *payload, uint32_t len)
     return NULL;
 }
 
-void dma_aligned_payload_free(void *payload) 
+ATTR_NC __attribute__((optimize("O3"))) void dma_aligned_payload_free(void *payload) 
 {
     DBG_PRINT("[%s]\n", __func__);
     struct pbuf *p = pbuf_from_payload(payload, 0);
@@ -157,7 +157,7 @@ void dma_aligned_pbuf_pool_deinit(void)
     dma_aligned_count = dma_aligned_head = dma_aligned_tail = 0;
 }
 
-struct pbuf *dma_aligned_pbuf_alloc(u16_t len)
+ATTR_NC __attribute__((optimize("O3"))) struct pbuf *dma_aligned_pbuf_alloc(u16_t len)
 {
     DBG_PRINT("[%s]\n", __func__);
 
@@ -225,7 +225,7 @@ struct pbuf *dma_aligned_pbuf_alloc(u16_t len)
     return p;
 }
 
-void dma_aligned_pbuf_free(struct pbuf *p)
+ATTR_NC __attribute__((optimize("O3"))) void dma_aligned_pbuf_free(struct pbuf *p)
 {
     DBG_PRINT("[%s]\n", __func__);
 

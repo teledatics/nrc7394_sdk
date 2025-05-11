@@ -269,7 +269,7 @@ a lot of data that needs to be copied, this should be set high. */
 # define PBUF_POOL_SIZE          5
 #else
 # define PBUF_POOL_SIZE          20
-#endif
+#endif /* NRC7394_DMA_MEMPOOL */
 
 /* MEMP_NUM_PBUF: the number of memp struct pbufs. If the application
    sends a lot of data out of ROM (or other static memory), this
@@ -279,13 +279,12 @@ a lot of data that needs to be copied, this should be set high. */
 #define MEM_LIBC_MALLOC   0
 #define MEMP_MEM_MALLOC   1
 #define mem_malloc(sz)            MEM_MALLOC(sz)
-// #define mem_free(ptr)             MEM_FREE(ptr)
 #define MEMP_NUM_PBUF               0 
 #define PBUF_POOL_USES_MEMP         1
 #define LWIP_SUPPORT_CUSTOM_PBUF    1
 #else
 #define MEMP_NUM_PBUF             100
-#endif
+#endif /* NRC7394_DMA_MEMPOOL */
 
 /* PBUF_POOL_BUFSIZE: the size of each pbuf in the pbuf pool. */
 #define PBUF_POOL_BUFSIZE       1520

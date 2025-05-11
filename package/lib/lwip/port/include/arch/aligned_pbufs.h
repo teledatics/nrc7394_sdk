@@ -58,7 +58,6 @@ void dma_aligned_pbuf_pool_deinit(void);
             }                                                                \
         }                                                                    \
     } while (0)
-// void mem_free(void *m) { MEM_FREE(m); }
 #else
 #define MEM_MALLOC(len) malloc(len)
 #define MEM_FREE(ptr) free(ptr)
